@@ -81,6 +81,29 @@ def _pdf_native_blocks(file_bytes: bytes) -> list[dict]:
 
 def _pdf_as_images_blocks(file_bytes: bytes) -> list[dict]:
     """Render each PDF page as PNG and pass as image blocks (MiniMax path)."""
+    pages = pdf_to_page_images(file_bytes)
+    blocks: list[dict] = [
+        {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": "image/png",
+                "data": base64.standard_b64encode(png).decode("ascii"),
+            },
+        }
+        for png in pages
+    ]
+    blocks.append(
+        {
+            "type": "text",
+            "text": f"This is a {len(pages)}-page PDF rendered as images. Convert all pages to LaTeX.",
+        }
+    )
+    return blocks
+
+
+def pdf_to_page_images(file_bytes: bytes) -> list[bytes]:
+    """Render each PDF page as PNG bytes. Used by MiniMax VLM path."""
     import fitz  # pymupdf
 
     with fitz.open(stream=file_bytes, filetype="pdf") as doc:
@@ -90,27 +113,5 @@ def _pdf_as_images_blocks(file_bytes: bytes) -> list[dict]:
                 f"PDF has {page_count} pages; maximum supported is {PDF_PAGE_LIMIT}. "
                 "Split the document or use a smaller file."
             )
-
-        blocks: list[dict] = []
         mat = fitz.Matrix(1.5, 1.5)  # ~110 DPI effective
-        for page in doc:
-            pix = page.get_pixmap(matrix=mat)
-            png_bytes = pix.tobytes("png")
-            blocks.append(
-                {
-                    "type": "image",
-                    "source": {
-                        "type": "base64",
-                        "media_type": "image/png",
-                        "data": base64.standard_b64encode(png_bytes).decode("ascii"),
-                    },
-                }
-            )
-
-    blocks.append(
-        {
-            "type": "text",
-            "text": f"This is a {page_count}-page PDF rendered as images. Convert all pages to LaTeX.",
-        }
-    )
-    return blocks
+        return [page.get_pixmap(matrix=mat).tobytes("png") for page in doc]
