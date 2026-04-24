@@ -201,38 +201,32 @@ async function startConvert() {
       const lines = buffer.split('\n');
       buffer = lines.pop(); // keep incomplete last line
 
+      let errorEventDetected = false;
       for (const line of lines) {
-        if (line.startsWith('data: ')) {
-          const chunk = line.slice(6).replace(/\\n/g, '\n');
-          accumulated += chunk;
-          if (state.editor) {
-            state.editor.setValue(accumulated);
-            // Scroll to end in Monaco
-            const model = state.editor.getModel?.();
-            if (model) {
-              const lastLine = model.getLineCount();
-              state.editor.revealLine?.(lastLine);
+        if (line.startsWith('event: error')) {
+          errorEventDetected = true;
+        } else if (line.startsWith('data: ')) {
+          if (errorEventDetected) {
+            errorEventDetected = false;
+            try {
+              const err = JSON.parse(line.slice(6));
+              showError(err.message || 'Unknown error');
+              if (state.editor) state.editor.setValue('');
+            } catch { showError('Unknown error occurred'); }
+          } else {
+            const chunk = JSON.parse(line.slice(6));
+            accumulated += chunk;
+            if (state.editor) {
+              state.editor.setValue(accumulated);
+              const model = state.editor.getModel?.();
+              if (model) state.editor.revealLine?.(model.getLineCount());
             }
           }
         } else if (line.startsWith('event: done')) {
           renderKatex();
           progressWrap.hidden = true;
-        } else if (line.startsWith('event: error')) {
-          // error data arrives on the next "data:" line — handled above via accumulated
-          // but the message is JSON; catch it separately
         }
       }
-    }
-
-    // Handle any JSON error chunk that came through the data stream
-    if (accumulated.trimStart().startsWith('{')) {
-      try {
-        const parsed = JSON.parse(accumulated);
-        if (parsed.message) {
-          showError(parsed.message);
-          if (state.editor) state.editor.setValue('');
-        }
-      } catch { /* not JSON, it's real LaTeX */ }
     }
   } catch (e) {
     showError(`Stream error: ${e.message}`);

@@ -10,6 +10,10 @@ Rules:
   - Inline math: $...$
   - Display math: \\[...\\] or \\begin{equation}...\\end{equation}
 - For tables, use the tabular environment with appropriate column specs.
+  - If a table has many columns or long entries, wrap it to prevent overflow:
+    \\resizebox{\\linewidth}{!}{\\begin{tabular}{...} ... \\end{tabular}}
+  - Always include \\usepackage{graphicx} in the preamble when using \\resizebox.
+  - A table must never extend beyond \\linewidth.
 - For figures, use \\includegraphics with a placeholder filename if the actual image is not available.
 - Preserve text formatting: bold (\\textbf), italic (\\textit), monospace (\\texttt).
 - If the document has a bibliography, include a \\begin{thebibliography} section.
