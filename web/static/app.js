@@ -288,8 +288,8 @@ async function compilePdf() {
     if (resp.ok) {
       const blob = await resp.blob();
       const url = URL.createObjectURL(blob);
-      pdfPreview.src = url;
-      switchTab('pdf');
+      // Open in new tab — more reliable than iframe across browsers
+      window.open(url, '_blank');
     } else {
       const detail = await resp.json().catch(() => ({ message: resp.statusText }));
       let parsed = detail;
