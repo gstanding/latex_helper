@@ -1,5 +1,6 @@
 import base64
 import os
+import re
 from abc import ABC, abstractmethod
 from typing import AsyncIterator
 
@@ -8,6 +9,19 @@ import httpx
 
 from latex_helper.prompts import SYSTEM_PROMPT
 from latex_helper.utils import pdf_to_page_images, prepare_content_blocks
+
+
+def _strip_end_document(latex: str) -> str:
+    """Remove trailing \\end{document} so pages can be appended."""
+    return re.sub(r'\s*\\end\{document\}\s*$', '', latex.rstrip())
+
+
+def _extract_body(latex: str) -> str:
+    """Return only the content between \\begin{document} and \\end{document}."""
+    m = re.search(r'\\begin\{document\}(.*?)(?:\\end\{document\}|$)', latex, re.DOTALL)
+    if m:
+        return m.group(1).strip()
+    return latex.strip()
 
 _ANTHROPIC_DEFAULT_MODEL = "claude-sonnet-4-6"
 _MINIMAX_DEFAULT_HOST = "https://api.minimaxi.com"
@@ -75,15 +89,26 @@ class MinimaxVLMConverter(LatexConverter):
     ) -> AsyncIterator[str]:
         if file_type == "pdf":
             pages = pdf_to_page_images(file_bytes)
-            for i, page_png in enumerate(pages):
+            if not pages:
+                return
+            first_b64 = base64.standard_b64encode(pages[0]).decode("ascii")
+            first_result = await self._call_vlm(
+                prompt=SYSTEM_PROMPT,
+                image_url=f"data:image/png;base64,{first_b64}",
+            )
+            if len(pages) == 1:
+                yield first_result
+                return
+            # Multi-page: strip \end{document} from page 1, append subsequent page bodies
+            yield _strip_end_document(first_result)
+            for page_png in pages[1:]:
                 b64 = base64.standard_b64encode(page_png).decode("ascii")
                 result = await self._call_vlm(
                     prompt=SYSTEM_PROMPT,
                     image_url=f"data:image/png;base64,{b64}",
                 )
-                if i > 0:
-                    yield "\n\n% --- Page break ---\n\n"
-                yield result
+                yield f"\n\n\\newpage\n\n{_extract_body(result)}"
+            yield "\n\\end{document}\n"
         else:
             # Single image
             ext = (filename or "image.png").rsplit(".", 1)[-1].lower()
