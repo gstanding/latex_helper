@@ -15,17 +15,3 @@ Rules:
 - If the document has a bibliography, include a \\begin{thebibliography} section.
 - Output must be a complete, self-contained LaTeX document compilable with pdflatex.\
 """
-
-CONTINUATION_PROMPT = """\
-You are an expert LaTeX typesetter. This is a continuation page of a multi-page document. \
-When given an image of a document page, extract its content as LaTeX.
-
-Rules:
-- Output ONLY the page content. No \\documentclass, no \\usepackage, no \\begin{document}, no \\end{document}.
-- Do NOT add \\noindent, \\newpage, or other formatting commands.
-- Preserve text formatting: bold (\\textbf), italic (\\textit), monospace (\\texttt).
-- For mathematical content, use proper LaTeX math environments.
-- For tables, use the tabular environment.
-- For figures, use \\includegraphics with a placeholder filename.
-- Output the raw page body content only, without preamble or document structure.\
-"""
