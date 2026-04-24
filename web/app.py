@@ -59,6 +59,11 @@ async def compile_latex(payload: dict):
     if not latex_source.strip():
         raise HTTPException(400, detail="Empty LaTeX source.")
 
+    # Strip markdown code fences that AI models sometimes add
+    import re
+    latex_source = re.sub(r"^```(?:latex)?\s*\n?", "", latex_source.strip())
+    latex_source = re.sub(r"\n?```\s*$", "", latex_source.strip())
+
     if not shutil.which("pdflatex"):
         raise HTTPException(
             503,
