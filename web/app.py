@@ -64,6 +64,9 @@ async def compile_latex(payload: dict):
     latex_source = re.sub(r"^```(?:latex)?\s*\n?", "", latex_source.strip())
     latex_source = re.sub(r"\n?```\s*$", "", latex_source.strip())
 
+    # Convert page break markers to actual LaTeX \newpage
+    latex_source = re.sub(r"%\s*---?\s*Page\s+break\s*---?\s*\n", "\n\\newpage\n", latex_source, flags=re.IGNORECASE)
+
     if not shutil.which("pdflatex") and not shutil.which("xelatex"):
         raise HTTPException(
             503,
