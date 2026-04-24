@@ -59,16 +59,25 @@ async def compile_latex(payload: dict):
     if not latex_source.strip():
         raise HTTPException(400, detail="Empty LaTeX source.")
 
-    if not shutil.which("pdflatex"):
+    # Strip markdown code fences that AI models sometimes add
+    import re
+    latex_source = re.sub(r"^```(?:latex)?\s*\n?", "", latex_source.strip())
+    latex_source = re.sub(r"\n?```\s*$", "", latex_source.strip())
+
+    if not shutil.which("pdflatex") and not shutil.which("xelatex"):
         raise HTTPException(
             503,
             detail=json.dumps(
                 {
                     "error": "pdflatex_not_found",
-                    "message": "pdflatex is not installed. Install TeX Live to use this feature.",
+                    "message": "pdflatex/xelatex is not installed. Install TeX Live to use this feature.",
                 }
             ),
         )
+
+    # Use xelatex for CJK/ctex documents, pdflatex otherwise
+    uses_ctex = "ctex" in latex_source or "xeCJK" in latex_source
+    compiler = "xelatex" if (uses_ctex and shutil.which("xelatex")) else "pdflatex"
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tex_path = os.path.join(tmpdir, "document.tex")
@@ -80,7 +89,7 @@ async def compile_latex(payload: dict):
 
         try:
             proc = await asyncio.create_subprocess_exec(
-                "pdflatex",
+                compiler,
                 "-interaction=nonstopmode",
                 "-output-directory",
                 tmpdir,
@@ -123,7 +132,11 @@ async def compile_latex(payload: dict):
 
 @app.get("/health/pdflatex")
 async def health_pdflatex():
-    return {"available": shutil.which("pdflatex") is not None}
+    return {
+        "available": shutil.which("pdflatex") is not None or shutil.which("xelatex") is not None,
+        "pdflatex": shutil.which("pdflatex") is not None,
+        "xelatex": shutil.which("xelatex") is not None,
+    }
 
 
 @app.get("/health/llm")
