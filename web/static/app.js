@@ -206,15 +206,17 @@ async function startConvert() {
         if (line.startsWith('event: error')) {
           errorEventDetected = true;
         } else if (line.startsWith('data: ')) {
+          const raw = line.slice(6);
+          if (!raw) continue;
           if (errorEventDetected) {
             errorEventDetected = false;
             try {
-              const err = JSON.parse(line.slice(6));
+              const err = JSON.parse(raw);
               showError(err.message || 'Unknown error');
               if (state.editor) state.editor.setValue('');
             } catch { showError('Unknown error occurred'); }
           } else {
-            const chunk = JSON.parse(line.slice(6));
+            const chunk = JSON.parse(raw);
             accumulated += chunk;
             if (state.editor) {
               state.editor.setValue(accumulated);

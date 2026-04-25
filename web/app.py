@@ -40,7 +40,7 @@ async def convert(file: UploadFile = File(...)):
     async def event_generator():
         try:
             async for chunk in converter.stream_latex(content, file_type, file.filename or ""):
-                yield f"data: {json.dumps(chunk)}\n\n"
+                yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
             yield "event: done\ndata: \n\n"
         except Exception as e:
             yield f"event: error\ndata: {json.dumps({'message': str(e)})}\n\n"
