@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -18,55 +18,63 @@
 </head>
 <body>
 
-  <!-- Upload Section -->
+  <!-- Header -->
   <header id="app-header">
     <h1>LaTeX Helper</h1>
     <span id="llm-badge" class="badge">…</span>
   </header>
 
+  <!-- Upload Section -->
   <section id="upload-section">
-    <div id="drop-target" tabindex="0" role="button" aria-label="Upload PDF or image">
+    <div id="drop-target" tabindex="0" role="button" aria-label="上传 PDF 或图片">
       <svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 24 24" fill="none"
            stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
         <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
         <polyline points="17 8 12 3 7 8"/>
         <line x1="12" y1="3" x2="12" y2="15"/>
       </svg>
-      <p>Drag &amp; drop a PDF or image here</p>
-      <p class="sub">or <label for="file-input" class="browse-link">browse file</label></p>
+      <p>拖拽 PDF 或图片到此处</p>
+      <p class="sub">或 <label for="file-input" class="browse-link">浏览文件</label></p>
       <input type="file" id="file-input" accept=".pdf,.png,.jpg,.jpeg,.gif,.webp">
     </div>
     <div id="file-info" hidden></div>
     <div id="upload-actions">
-      <button id="convert-btn" disabled>Convert to LaTeX</button>
-      <button id="clear-btn" hidden>Clear</button>
+      <button id="convert-btn" disabled>转换为 LaTeX</button>
+      <button id="clear-btn" hidden>清除</button>
     </div>
     <div id="progress-wrap" hidden>
       <div id="progress-bar"><div id="progress-fill"></div></div>
-      <span id="progress-label">Converting…</span>
+      <span id="progress-label">转换中…</span>
     </div>
-    <div id="error-msg" hidden></div>
   </section>
 
   <!-- Editor + Preview Section -->
   <section id="editor-section" hidden>
     <div id="editor-pane">
+      <!-- Compile loading overlay -->
+      <div id="compile-overlay" hidden>
+        <div class="big-spinner"></div>
+        <span>编译中…</span>
+      </div>
+
       <div id="editor-toolbar">
-        <span class="toolbar-title">LaTeX Source</span>
-        <button id="download-btn" title="Download .tex file">⬇ Download .tex</button>
-        <button id="compile-btn" title="Compile to PDF with pdflatex">⚙ Compile PDF</button>
+        <span class="toolbar-title">LaTeX 源码</span>
+        <span id="stream-status" hidden><span class="spinner"></span>转换中…</span>
+        <button id="reupload-btn" title="重新上传文件">↩ 重新上传</button>
+        <button id="download-btn" title="下载 .tex 文件">⬇ 下载 .tex</button>
+        <button id="compile-btn" title="使用 pdflatex 编译为 PDF">⚙ 编译 PDF</button>
       </div>
       <div id="monaco-container"></div>
       <div id="compile-log" hidden>
-        <div class="log-header">pdflatex log <button id="close-log">✕</button></div>
+        <div class="log-header">pdflatex 日志 <button id="close-log">✕</button></div>
         <pre id="log-content"></pre>
       </div>
     </div>
 
     <div id="preview-pane">
       <div id="preview-tabs">
-        <button class="tab-btn active" data-tab="katex">KaTeX Preview</button>
-        <button class="tab-btn" data-tab="pdf" id="pdf-tab-btn">PDF Preview</button>
+        <button class="tab-btn active" data-tab="katex">KaTeX 预览</button>
+        <button class="tab-btn" data-tab="pdf" id="pdf-tab-btn">PDF 预览</button>
       </div>
       <div id="katex-preview" class="tab-content active"></div>
       <iframe id="pdf-preview" class="tab-content" src="about:blank" hidden></iframe>
@@ -76,6 +84,24 @@
   <footer id="app-footer">
     <span id="footer-llm"></span>
   </footer>
+
+  <!-- Modal dialog -->
+  <div id="modal-overlay" hidden role="dialog" aria-modal="true">
+    <div id="modal-box">
+      <div id="modal-header">
+        <span id="modal-title"></span>
+        <button id="modal-close" aria-label="关闭">✕</button>
+      </div>
+      <div id="modal-body"></div>
+      <div id="modal-footer">
+        <input id="modal-input" type="text" hidden>
+        <div id="modal-actions">
+          <button id="modal-cancel" hidden>取消</button>
+          <button id="modal-confirm">关闭</button>
+        </div>
+      </div>
+    </div>
+  </div>
 
   <script src="/static/app.js"></script>
 </body>

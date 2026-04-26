@@ -1,30 +1,43 @@
 /* ─── State ─────────────────────────────────────────────────────────── */
 const state = {
   file: null,
-  editor: null,          // Monaco instance (or null if CDN failed)
+  editor: null,
   pdflatexOk: false,
+  pdfUrl: null,
 };
 
 /* ─── DOM refs ──────────────────────────────────────────────────────── */
 const $ = id => document.getElementById(id);
-const dropTarget   = $('drop-target');
-const fileInput    = $('file-input');
-const fileInfo     = $('file-info');
-const convertBtn   = $('convert-btn');
-const clearBtn     = $('clear-btn');
-const progressWrap = $('progress-wrap');
-const errorMsg     = $('error-msg');
+const dropTarget     = $('drop-target');
+const fileInput      = $('file-input');
+const fileInfo       = $('file-info');
+const convertBtn     = $('convert-btn');
+const clearBtn       = $('clear-btn');
+const progressWrap   = $('progress-wrap');
 const uploadSection  = $('upload-section');
 const editorSection  = $('editor-section');
 const monacoContainer = $('monaco-container');
-const katexPreview = $('katex-preview');
-const pdfPreview   = $('pdf-preview');
-const compileBtn   = $('compile-btn');
-const downloadBtn  = $('download-btn');
-const compileLog   = $('compile-log');
-const logContent   = $('log-content');
-const llmBadge     = $('llm-badge');
-const footerLlm    = $('footer-llm');
+const katexPreview   = $('katex-preview');
+const pdfPreview     = $('pdf-preview');
+const compileBtn     = $('compile-btn');
+const downloadBtn    = $('download-btn');
+const reuploadBtn    = $('reupload-btn');
+const compileLog     = $('compile-log');
+const logContent     = $('log-content');
+const llmBadge       = $('llm-badge');
+const footerLlm      = $('footer-llm');
+const streamStatus   = $('stream-status');
+const compileOverlay = $('compile-overlay');
+
+// Modal
+const modalOverlay = $('modal-overlay');
+const modalTitle   = $('modal-title');
+const modalBody    = $('modal-body');
+const modalInput   = $('modal-input');
+const modalCancel  = $('modal-cancel');
+const modalConfirm = $('modal-confirm');
+const modalClose   = $('modal-close');
+let _modalResolve  = null;
 
 /* ─── Init ──────────────────────────────────────────────────────────── */
 (async function init() {
@@ -129,7 +142,7 @@ function handleFile(file) {
     file.type.startsWith('image/') ||
     file.name.toLowerCase().endsWith('.pdf');
   if (!ok) {
-    showError('Only PDF or image files (PNG, JPG, GIF, WebP) are supported.');
+    showErrorModal('文件格式不支持', '仅支持 PDF 或图片文件（PNG、JPG、GIF、WebP）。');
     return;
   }
   state.file = file;
@@ -137,13 +150,13 @@ function handleFile(file) {
   fileInfo.hidden = false;
   convertBtn.disabled = false;
   clearBtn.hidden = false;
-  hideError();
 }
 
 /* ─── Buttons ───────────────────────────────────────────────────────── */
 function initButtons() {
   convertBtn.addEventListener('click', startConvert);
   clearBtn.addEventListener('click', resetUpload);
+  reuploadBtn.addEventListener('click', resetUpload);
   downloadBtn.addEventListener('click', downloadTex);
   compileBtn.addEventListener('click', compilePdf);
   $('close-log').addEventListener('click', () => { compileLog.hidden = true; });
@@ -151,6 +164,78 @@ function initButtons() {
   document.querySelectorAll('.tab-btn').forEach(btn => {
     btn.addEventListener('click', () => switchTab(btn.dataset.tab));
   });
+
+  // Modal wiring
+  modalClose.addEventListener('click', () => closeModal(null));
+  modalCancel.addEventListener('click', () => closeModal(null));
+  modalConfirm.addEventListener('click', () => {
+    closeModal(modalInput.hidden ? true : modalInput.value);
+  });
+  modalOverlay.addEventListener('click', e => {
+    if (e.target === modalOverlay) closeModal(null);
+  });
+  modalInput.addEventListener('keydown', e => {
+    if (e.key === 'Enter') closeModal(modalInput.value);
+    if (e.key === 'Escape') closeModal(null);
+  });
+}
+
+/* ─── Modal ─────────────────────────────────────────────────────────── */
+// Error/info modal — just show message, no input. Returns Promise<void>.
+function showErrorModal(title, message, log = null) {
+  return new Promise(resolve => {
+    _modalResolve = resolve;
+    modalTitle.textContent = title;
+    modalBody.innerHTML = '';
+    modalBody.className = 'is-error';
+
+    const p = document.createElement('p');
+    p.textContent = message;
+    modalBody.appendChild(p);
+
+    if (log) {
+      const pre = document.createElement('pre');
+      pre.textContent = log;
+      modalBody.appendChild(pre);
+    }
+
+    modalInput.hidden = true;
+    modalCancel.hidden = true;
+    modalConfirm.textContent = '关闭';
+    modalOverlay.hidden = false;
+  });
+}
+
+// Input modal — show prompt with pre-filled value. Returns Promise<string|null>.
+function showInputModal(title, message, defaultValue = '') {
+  return new Promise(resolve => {
+    _modalResolve = resolve;
+    modalTitle.textContent = title;
+    modalBody.innerHTML = '';
+    modalBody.className = '';
+
+    if (message) {
+      const p = document.createElement('p');
+      p.textContent = message;
+      modalBody.appendChild(p);
+    }
+
+    modalInput.hidden = false;
+    modalInput.value = defaultValue;
+    modalCancel.hidden = false;
+    modalConfirm.textContent = '确定';
+    modalOverlay.hidden = false;
+
+    setTimeout(() => { modalInput.select(); modalInput.focus(); }, 50);
+  });
+}
+
+function closeModal(value) {
+  modalOverlay.hidden = true;
+  if (_modalResolve) {
+    _modalResolve(value);
+    _modalResolve = null;
+  }
 }
 
 /* ─── Conversion (SSE) ──────────────────────────────────────────────── */
@@ -160,7 +245,6 @@ async function startConvert() {
   convertBtn.disabled = true;
   clearBtn.hidden = true;
   progressWrap.hidden = false;
-  hideError();
 
   const formData = new FormData();
   formData.append('file', state.file);
@@ -169,23 +253,23 @@ async function startConvert() {
   try {
     response = await fetch('/convert', { method: 'POST', body: formData });
   } catch (e) {
-    showError(`Network error: ${e.message}`);
+    showErrorModal('网络错误', e.message);
     resetProgress();
     return;
   }
 
   if (!response.ok) {
     const text = await response.text().catch(() => '');
-    showError(`Server error ${response.status}: ${text || response.statusText}`);
+    showErrorModal(`服务器错误 ${response.status}`, text || response.statusText);
     resetProgress();
     return;
   }
 
   let accumulated = '';
 
-  // Show editor immediately so text streams in
   uploadSection.style.display = 'none';
   editorSection.hidden = false;
+  streamStatus.hidden = false;
   if (state.editor) state.editor.setValue('');
 
   const reader = response.body.getReader();
@@ -199,7 +283,7 @@ async function startConvert() {
 
       buffer += decoder.decode(value, { stream: true });
       const lines = buffer.split('\n');
-      buffer = lines.pop(); // keep incomplete last line
+      buffer = lines.pop();
 
       let errorEventDetected = false;
       for (const line of lines) {
@@ -212,9 +296,11 @@ async function startConvert() {
             errorEventDetected = false;
             try {
               const err = JSON.parse(raw);
-              showError(err.message || 'Unknown error');
+              showErrorModal('转换失败', err.message || '未知错误');
               if (state.editor) state.editor.setValue('');
-            } catch { showError('Unknown error occurred'); }
+            } catch {
+              showErrorModal('转换失败', '发生未知错误');
+            }
           } else {
             const chunk = JSON.parse(raw);
             accumulated += chunk;
@@ -227,12 +313,14 @@ async function startConvert() {
         } else if (line.startsWith('event: done')) {
           renderKatex();
           progressWrap.hidden = true;
+          streamStatus.hidden = true;
         }
       }
     }
   } catch (e) {
-    showError(`Stream error: ${e.message}`);
+    showErrorModal('流式传输错误', e.message);
   } finally {
+    streamStatus.hidden = true;
     resetProgress();
   }
 }
@@ -240,7 +328,6 @@ async function startConvert() {
 /* ─── KaTeX preview ─────────────────────────────────────────────────── */
 function renderKatex() {
   const latex = state.editor ? state.editor.getValue() : '';
-  // Set as text first (HTML-escapes everything)
   katexPreview.textContent = latex || '(editor is empty)';
 
   if (typeof renderMathInElement === 'function') {
@@ -263,7 +350,7 @@ function renderKatex() {
 /* ─── PDF compilation ───────────────────────────────────────────────── */
 async function compilePdf() {
   if (!state.pdflatexOk) {
-    showError('pdflatex is not installed on this server. Install TeX Live to enable PDF compilation.');
+    showErrorModal('pdflatex 不可用', '服务器未安装 pdflatex，请安装 TeX Live 后重试。');
     return;
   }
 
@@ -271,7 +358,7 @@ async function compilePdf() {
   if (!latex.trim()) return;
 
   compileBtn.disabled = true;
-  compileBtn.textContent = '⚙ Compiling…';
+  compileOverlay.hidden = false;
   compileLog.hidden = true;
 
   try {
@@ -283,42 +370,65 @@ async function compilePdf() {
 
     if (resp.ok) {
       const blob = await resp.blob();
-      const url = URL.createObjectURL(blob);
-      // Open in new tab — more reliable than iframe across browsers
-      window.open(url, '_blank');
+      if (state.pdfUrl) URL.revokeObjectURL(state.pdfUrl);
+      state.pdfUrl = URL.createObjectURL(blob);
+      pdfPreview.src = state.pdfUrl;
+      switchTab('pdf');
     } else {
       const detail = await resp.json().catch(() => ({ message: resp.statusText }));
       let parsed = detail;
-      // detail.detail might be a JSON string
       if (typeof detail.detail === 'string') {
         try { parsed = JSON.parse(detail.detail); } catch { parsed = { message: detail.detail }; }
       }
-      if (parsed.log) {
-        logContent.textContent = parsed.log;
-        compileLog.hidden = false;
-      } else {
-        showError(parsed.message || `Compilation error (${resp.status})`);
-      }
+      const msg = parsed.message || `编译失败（HTTP ${resp.status}）`;
+      const log = parsed.log || null;
+      showErrorModal('编译失败', msg, log);
     }
   } catch (e) {
-    showError(`Network error: ${e.message}`);
+    showErrorModal('网络错误', e.message);
   } finally {
+    compileOverlay.hidden = true;
     compileBtn.disabled = false;
-    compileBtn.textContent = '⚙ Compile PDF';
   }
 }
 
 /* ─── Download ──────────────────────────────────────────────────────── */
-function downloadTex() {
+async function downloadTex() {
   const latex = state.editor ? state.editor.getValue() : '';
-  if (!latex) return;
+  if (!latex.trim()) {
+    showErrorModal('内容为空', '编辑器中没有可下载的内容。');
+    return;
+  }
+
+  const defaultName = getDefaultFilename();
+  const raw = await showInputModal('下载 LaTeX 文件', '输入文件名（无需加后缀）：', defaultName);
+  if (raw === null) return;
+
+  let name = (raw || defaultName).trim() || defaultName;
+  if (!name.endsWith('.tex')) name += '.tex';
+
   const blob = new Blob([latex], { type: 'text/x-tex' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = 'document.tex';
+  a.download = name;
+  a.style.display = 'none';
+  document.body.appendChild(a);
   a.click();
-  URL.revokeObjectURL(url);
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function getDefaultFilename() {
+  const now = new Date();
+  const pad = n => String(n).padStart(2, '0');
+  const yy = String(now.getFullYear()).slice(-2);
+  const MM = pad(now.getMonth() + 1);
+  const dd = pad(now.getDate());
+  const hh = pad(now.getHours());
+  const mm = pad(now.getMinutes());
+  const ss = pad(now.getSeconds());
+  return `document${yy}${MM}${dd}${hh}${mm}${ss}`;
 }
 
 /* ─── Tab switching ─────────────────────────────────────────────────── */
@@ -329,16 +439,10 @@ function switchTab(tab) {
   katexPreview.classList.toggle('active', tab === 'katex');
   katexPreview.style.display = tab === 'katex' ? 'block' : 'none';
   pdfPreview.hidden = tab !== 'pdf';
-  if (tab === 'pdf') pdfPreview.style.display = 'block';
+  pdfPreview.style.display = tab === 'pdf' ? 'block' : '';
 }
 
 /* ─── Helpers ───────────────────────────────────────────────────────── */
-function showError(msg) {
-  errorMsg.textContent = msg;
-  errorMsg.hidden = false;
-}
-function hideError() { errorMsg.hidden = true; }
-
 function resetProgress() {
   progressWrap.hidden = true;
   convertBtn.disabled = false;
@@ -352,11 +456,12 @@ function resetUpload() {
   fileInfo.textContent = '';
   convertBtn.disabled = true;
   clearBtn.hidden = true;
-  hideError();
   uploadSection.style.display = '';
   editorSection.hidden = true;
+  streamStatus.hidden = true;
   if (state.editor) state.editor.setValue('');
   katexPreview.textContent = '';
+  if (state.pdfUrl) { URL.revokeObjectURL(state.pdfUrl); state.pdfUrl = null; }
   pdfPreview.src = 'about:blank';
   compileLog.hidden = true;
 }
