@@ -5,12 +5,31 @@ import shutil
 import tempfile
 
 import aiofiles
+
+_PDF_MAGIC = b"%PDF-"
+
+
+def _is_valid_pdf(path: str) -> bool:
+    """Check file starts with PDF magic bytes and ends with %%EOF (properly finalized)."""
+    try:
+        size = os.path.getsize(path)
+        if size < 256:
+            return False
+        with open(path, "rb") as f:
+            if f.read(5) != _PDF_MAGIC:
+                return False
+            # A properly finalized PDF must contain %%EOF near the end.
+            # Incomplete/crashed compilations won't have it.
+            f.seek(max(0, size - 1024))
+            return b"%%EOF" in f.read()
+    except OSError:
+        return False
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from latex_helper.converter import get_converter, get_llm_info
-from latex_helper.utils import MAX_FILE_SIZE, detect_file_type
+from latex_helper.utils import MAX_FILE_SIZE, detect_file_type, postprocess_latex
 
 app = FastAPI(title="LaTeX Helper")
 
@@ -39,8 +58,18 @@ async def convert(file: UploadFile = File(...)):
 
     async def event_generator():
         try:
+            # Buffer the full LaTeX so we can post-process before sending
+            full_latex = ""
             async for chunk in converter.stream_latex(content, file_type, file.filename or ""):
-                yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+                full_latex += chunk
+
+            full_latex = postprocess_latex(full_latex)
+
+            # Stream the result to the frontend in reasonably sized chunks
+            chunk_size = 512
+            for i in range(0, len(full_latex), chunk_size):
+                yield f"data: {json.dumps(full_latex[i:i + chunk_size], ensure_ascii=False)}\n\n"
+
             yield "event: done\ndata: \n\n"
         except Exception as e:
             yield f"event: error\ndata: {json.dumps({'message': str(e)})}\n\n"
@@ -105,12 +134,15 @@ async def compile_latex(payload: dict):
                 proc.kill()
                 raise HTTPException(
                     408,
-                    detail=json.dumps({"error": "timeout", "message": "pdflatex timed out after 30s."}),
+                    detail=json.dumps({"error": "timeout", "message": "pdflatex 编译超时（30s）。"}),
                 )
         except FileNotFoundError:
             raise HTTPException(503, detail=json.dumps({"error": "pdflatex_not_found"}))
 
-        if not os.path.exists(pdf_path):
+        # 以 PDF magic bytes 验证输出文件，而不是依赖退出码：
+        # LaTeX 有 warning 时退出码也可能非零，但仍产生合法 PDF；
+        # 而致命错误可能留下残缺文件，退出码同样非零。
+        if not _is_valid_pdf(pdf_path):
             log_content = ""
             if os.path.exists(log_path):
                 async with aiofiles.open(log_path, "r", errors="replace") as f:
