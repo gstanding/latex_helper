@@ -1,10 +1,13 @@
 import asyncio
 import json
+import logging
 import os
 import shutil
 import tempfile
 
 import aiofiles
+
+logger = logging.getLogger("latex_helper")
 
 _PDF_MAGIC = b"%PDF-"
 
@@ -72,6 +75,7 @@ async def convert(file: UploadFile = File(...)):
 
             yield "event: done\ndata: \n\n"
         except Exception as e:
+            logger.error("Conversion error: %s", e, exc_info=True)
             yield f"event: error\ndata: {json.dumps({'message': str(e)})}\n\n"
 
     return StreamingResponse(

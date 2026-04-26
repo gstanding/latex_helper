@@ -128,7 +128,11 @@ function initDragDrop() {
     dropTarget.classList.remove('drag-over');
     handleFile(e.dataTransfer.files[0]);
   });
-  dropTarget.addEventListener('click', () => fileInput.click());
+  dropTarget.addEventListener('click', e => {
+    // label[for="file-input"] already triggers the input natively; skip to avoid double dialog
+    if (e.target.closest('label') || e.target === fileInput) return;
+    fileInput.click();
+  });
   dropTarget.addEventListener('keydown', e => {
     if (e.key === 'Enter' || e.key === ' ') fileInput.click();
   });

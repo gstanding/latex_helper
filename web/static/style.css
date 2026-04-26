@@ -162,12 +162,13 @@ button {
 
 /* Stream status in toolbar */
 #stream-status {
-  display: inline-flex;
+  display: none;
   align-items: center;
   font-size: 11px;
   color: var(--text-dim);
   margin-right: 4px;
 }
+#stream-status:not([hidden]) { display: inline-flex; }
 
 /* ── Editor + Preview ────────────────────────── */
 #editor-section {
