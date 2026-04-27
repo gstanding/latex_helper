@@ -87,6 +87,35 @@ html, body {
   text-align: center;
 }
 
+/* Figure mode selector */
+#figure-mode-wrap {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+  font-size: 13px;
+}
+.figure-mode-label {
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.figure-mode-option {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  cursor: pointer;
+  color: var(--text);
+}
+.figure-mode-option input[type="radio"] {
+  accent-color: var(--accent);
+  width: 14px;
+  height: 14px;
+  cursor: pointer;
+}
+.figure-mode-option span {
+  white-space: nowrap;
+}
+
 #upload-actions { display: flex; gap: 10px; }
 
 button {

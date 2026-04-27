@@ -7,7 +7,7 @@ from typing import AsyncIterator
 import anthropic
 import httpx
 
-from latex_helper.prompts import SYSTEM_PROMPT
+from latex_helper.prompts import get_system_prompt
 from latex_helper.utils import pdf_to_page_images, prepare_content_blocks
 
 
@@ -31,7 +31,12 @@ _MINIMAX_VLM_PATH = "/v1/coding_plan/vlm"
 class LatexConverter(ABC):
     @abstractmethod
     async def stream_latex(
-        self, file_bytes: bytes, file_type: str, filename: str
+        self,
+        file_bytes: bytes,
+        file_type: str,
+        filename: str,
+        figure_mode: str = "draw",
+        figure_count: int = 0,
     ) -> AsyncIterator[str]: ...
 
 
@@ -41,13 +46,19 @@ class AnthropicConverter(LatexConverter):
         self.model = model
 
     async def stream_latex(
-        self, file_bytes: bytes, file_type: str, filename: str
+        self,
+        file_bytes: bytes,
+        file_type: str,
+        filename: str,
+        figure_mode: str = "draw",
+        figure_count: int = 0,
     ) -> AsyncIterator[str]:
+        system_prompt = get_system_prompt(figure_mode, figure_count)
         blocks = prepare_content_blocks(file_bytes, file_type, filename, use_native_pdf=True)
         async with self.client.messages.stream(
             model=self.model,
             max_tokens=8192,
-            system=SYSTEM_PROMPT,
+            system=system_prompt,
             messages=[{"role": "user", "content": blocks}],
         ) as stream:
             async for text in stream.text_stream:
@@ -68,7 +79,7 @@ class MinimaxVLMConverter(LatexConverter):
             "MM-API-Source": "Minimax-MCP",
             "Content-Type": "application/json",
         }
-        async with httpx.AsyncClient(timeout=120.0) as client:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(connect=30.0, read=300.0, write=60.0, pool=10.0)) as client:
             resp = await client.post(
                 url,
                 headers=headers,
@@ -85,15 +96,21 @@ class MinimaxVLMConverter(LatexConverter):
             return data.get("content", "")
 
     async def stream_latex(
-        self, file_bytes: bytes, file_type: str, filename: str
+        self,
+        file_bytes: bytes,
+        file_type: str,
+        filename: str,
+        figure_mode: str = "draw",
+        figure_count: int = 0,
     ) -> AsyncIterator[str]:
+        system_prompt = get_system_prompt(figure_mode, figure_count)
         if file_type == "pdf":
             pages = pdf_to_page_images(file_bytes)
             if not pages:
                 return
             first_b64 = base64.standard_b64encode(pages[0]).decode("ascii")
             first_result = await self._call_vlm(
-                prompt=SYSTEM_PROMPT,
+                prompt=system_prompt,
                 image_url=f"data:image/png;base64,{first_b64}",
             )
             if len(pages) == 1:
@@ -104,7 +121,7 @@ class MinimaxVLMConverter(LatexConverter):
             for page_png in pages[1:]:
                 b64 = base64.standard_b64encode(page_png).decode("ascii")
                 result = await self._call_vlm(
-                    prompt=SYSTEM_PROMPT,
+                    prompt=system_prompt,
                     image_url=f"data:image/png;base64,{b64}",
                 )
                 yield f"\n\n\\newpage\n\n{_extract_body(result)}"
@@ -116,7 +133,7 @@ class MinimaxVLMConverter(LatexConverter):
             fmt = fmt_map.get(ext, "png")
             b64 = base64.standard_b64encode(file_bytes).decode("ascii")
             result = await self._call_vlm(
-                prompt=SYSTEM_PROMPT,
+                prompt=system_prompt,
                 image_url=f"data:image/{fmt};base64,{b64}",
             )
             yield result

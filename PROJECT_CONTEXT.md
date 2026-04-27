@@ -72,17 +72,29 @@ MINIMAX_API_HOST=https://...      # 覆盖 MiniMax host
 
 **`/convert` 关键流程**：
 ```python
-# 1. 完整收集 LLM 输出（不实时流出，先缓冲）
-full_latex = ""
-async for chunk in converter.stream_latex(...):
+# 接受表单字段 figure_mode: str（draw/skip/screenshot，默认 draw）
+
+# screenshot 模式预提取图像（在调 LLM 之前，以确定 figure_count）
+if figure_mode == "screenshot" and file_type == "pdf":
+    raw_figures = extract_pdf_figures(content)       # {name: bytes}
+    figure_count = len(raw_figures)
+    figures_b64 = {k: base64.b64encode(v).decode() for k, v in raw_figures.items()}
+
+# 1. 完整收集 LLM 输出（缓冲后处理）
+async for chunk in converter.stream_latex(..., figure_mode=figure_mode, figure_count=figure_count):
     full_latex += chunk
 
-# 2. 后处理（自动修复模型输出问题）
+# 2. 后处理
 full_latex = postprocess_latex(full_latex)
 
-# 3. 分块流式推给前端（512字节/块，SSE格式）
+# 3. 分块推给前端
 for i in range(0, len(full_latex), 512):
     yield f"data: {json.dumps(full_latex[i:i+512])}\n\n"
+
+# 4. screenshot 模式额外推送图像数据
+if figures_b64:
+    yield f"event: images\ndata: {json.dumps(figures_b64)}\n\n"
+
 yield "event: done\ndata: \n\n"
 ```
 
@@ -100,9 +112,16 @@ def _is_valid_pdf(path: str) -> bool:
 - `MinimaxVLMConverter`：把 PDF 每页渲染成 PNG，逐页调用 MiniMax VLM REST API，每页返回完整 LaTeX，多页拼接
 - `get_converter()` 根据 `LLM_PROVIDER` 环境变量自动选择
 
-### `latex_helper/utils.py` — 后处理器（重要）
+### `latex_helper/utils.py` — 工具函数
 
-`postprocess_latex(latex: str) -> str` 在每次转换后自动修复四类模型输出问题：
+#### `extract_pdf_figures(file_bytes) -> dict[str, bytes]`
+从 PDF 中提取嵌入的光栅图像，返回 `{"figure1.png": png_bytes, ...}`。  
+优先提取 XObject 嵌入图（`page.get_images()`），若无嵌入图则退回到渲染含矢量绘图的页面区域（`page.get_drawings()`）。  
+忽略小于 64×64px 的装饰性小图。供 `screenshot` 模式使用。
+
+#### `postprocess_latex(latex: str) -> str` — 后处理器（重要）
+
+在每次转换后自动修复四类模型输出问题：
 
 1. **自动补全未定义颜色**  
    扫描 `\color{}`、`\textcolor{}`、TikZ 选项中所有颜色名，与 `\definecolor` 已声明的对比，对缺失的按名称关键词推断色值（`headerblue` → 深蓝，`textyellow` → 黄色等）自动插入 `\definecolor`
@@ -118,10 +137,20 @@ def _is_valid_pdf(path: str) -> bool:
 
 ### `latex_helper/prompts.py` — System Prompt 要点
 
-- 数学图形必须用 TikZ 重绘（四步方法论：分析→推导精确坐标→硬编码共享→只画原图有的）
-- 颜色规则：所有颜色必须先 `\definecolor` 再用；`\tikzset` 必须在 `\usepackage{tikz}` 后
+提供 `get_system_prompt(figure_mode, figure_count) -> str`，根据图形处理模式返回不同 prompt：
+
+| `figure_mode` | 行为 |
+|---|---|
+| `"draw"`（默认） | 用 TikZ 重绘数学图形（四步方法论：分析→精确坐标→硬编码共享→只画原图有的） |
+| `"skip"` | 跳过所有图形，不插入任何占位符 |
+| `"screenshot"` | 引用预提取的 `figure1.png`、`figure2.png` 等文件 |
+
+通用规则（所有模式）：
+- 颜色必须先 `\definecolor` 再用；`\tikzset` 必须在 `\usepackage{tikz}` 后
 - ctex 文档类下禁止 `\begin{CJK*}`
-- 禁止 `\includegraphics` 引用不存在的图片，找不到的图直接省略
+- 保留文本格式（`\textbf`、`\textit`、`\texttt`）
+
+`SYSTEM_PROMPT` 保留为向后兼容的 `draw` 模式 prompt。
 
 ---
 
@@ -129,10 +158,11 @@ def _is_valid_pdf(path: str) -> bool:
 
 ### SSE 解析（转换流）
 ```javascript
-// 支持两种事件类型
-// event: error  → data: {"message": "..."}  显示错误弹窗
-// event: done   → 触发 KaTeX 渲染，隐藏 spinner
-// 普通 data:    → 累加到编辑器
+// 支持以下事件类型（pendingEvent 状态机解析）：
+// event: error   → data: {"message": "..."}  显示错误弹窗
+// event: images  → data: {filename: base64}  存入 state.figures（screenshot 模式）
+// event: done    → 触发 KaTeX 渲染，隐藏 spinner
+// 无 event 前缀   → data: "chunk"  累加到编辑器
 ```
 
 ### 状态管理
@@ -142,6 +172,7 @@ const state = {
   editor: null,      // Monaco 实例（或 fallback textarea）
   pdflatexOk: false, // pdflatex 是否可用
   pdfUrl: null,      // 当前编译 PDF 的 blob URL（用于释放内存）
+  figures: {},       // screenshot 模式下提取的图像 {filename: base64}
 };
 ```
 
@@ -194,4 +225,4 @@ Python 3.11（macOS 上用 `python3.11`，系统默认 python3 是 3.6 不可用
 
 - 仓库：`https://github.com/gstanding/latex_helper`
 - 主分支：`claude/analyze-doc2latex-conversion-GURWp`（当前工作分支，也是 main 的 PR 来源）
-- 最新 commit：Fix spinner visibility, double file dialog, and add SSE error logging
+- 最新 commit：Add figure mode toggle (draw/skip/screenshot) with PDF figure extraction

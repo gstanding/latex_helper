@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -27,12 +28,12 @@ def _is_valid_pdf(path: str) -> bool:
             return b"%%EOF" in f.read()
     except OSError:
         return False
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from latex_helper.converter import get_converter, get_llm_info
-from latex_helper.utils import MAX_FILE_SIZE, detect_file_type, postprocess_latex
+from latex_helper.utils import MAX_FILE_SIZE, detect_file_type, extract_pdf_figures, postprocess_latex
 
 app = FastAPI(title="LaTeX Helper")
 
@@ -45,33 +46,61 @@ async def index():
     return FileResponse(os.path.join(_STATIC_DIR, "index.html"))
 
 
+_VALID_FIGURE_MODES = {"draw", "skip", "screenshot"}
+
+
 @app.post("/convert")
-async def convert(file: UploadFile = File(...)):
+async def convert(
+    file: UploadFile = File(...),
+    figure_mode: str = Form("draw"),
+):
     content = await file.read()
 
     if len(content) > MAX_FILE_SIZE:
         raise HTTPException(413, detail="File size exceeds 20 MB limit.")
+
+    if figure_mode not in _VALID_FIGURE_MODES:
+        figure_mode = "draw"
 
     try:
         file_type = detect_file_type(file.filename or "", file.content_type)
     except ValueError as e:
         raise HTTPException(415, detail=str(e))
 
+    # Pre-extract figures for screenshot mode (before calling LLM so we know the count)
+    figures_b64: dict[str, str] = {}
+    figure_count = 0
+    if figure_mode == "screenshot" and file_type == "pdf":
+        raw_figures = extract_pdf_figures(content)
+        figure_count = len(raw_figures)
+        figures_b64 = {
+            name: base64.standard_b64encode(data).decode("ascii")
+            for name, data in raw_figures.items()
+        }
+
     converter = get_converter()
 
     async def event_generator():
         try:
-            # Buffer the full LaTeX so we can post-process before sending
             full_latex = ""
-            async for chunk in converter.stream_latex(content, file_type, file.filename or ""):
+            async for chunk in converter.stream_latex(
+                content,
+                file_type,
+                file.filename or "",
+                figure_mode=figure_mode,
+                figure_count=figure_count,
+            ):
                 full_latex += chunk
 
             full_latex = postprocess_latex(full_latex)
 
-            # Stream the result to the frontend in reasonably sized chunks
             chunk_size = 512
             for i in range(0, len(full_latex), chunk_size):
                 yield f"data: {json.dumps(full_latex[i:i + chunk_size], ensure_ascii=False)}\n\n"
+
+            # Send extracted figure images for screenshot mode
+            if figures_b64:
+                yield f"event: images\ndata: {json.dumps(figures_b64, ensure_ascii=False)}\n\n"
 
             yield "event: done\ndata: \n\n"
         except Exception as e:
@@ -88,6 +117,7 @@ async def convert(file: UploadFile = File(...)):
 @app.post("/compile")
 async def compile_latex(payload: dict):
     latex_source: str = payload.get("latex", "")
+    images: dict = payload.get("images", {})  # {filename: base64_string}
     if not latex_source.strip():
         raise HTTPException(400, detail="Empty LaTeX source.")
 
@@ -118,6 +148,17 @@ async def compile_latex(payload: dict):
         tex_path = os.path.join(tmpdir, "document.tex")
         pdf_path = os.path.join(tmpdir, "document.pdf")
         log_path = os.path.join(tmpdir, "document.log")
+
+        # Write embedded figure images so \includegraphics can resolve them
+        for img_name, img_b64 in images.items():
+            safe = re.sub(r"[^a-zA-Z0-9._-]", "", img_name)
+            if not safe:
+                continue
+            try:
+                with open(os.path.join(tmpdir, safe), "wb") as f:
+                    f.write(base64.b64decode(img_b64))
+            except Exception:
+                pass
 
         async with aiofiles.open(tex_path, "w") as f:
             await f.write(latex_source)
