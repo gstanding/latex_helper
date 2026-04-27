@@ -4,6 +4,7 @@ const state = {
   editor: null,
   pdflatexOk: false,
   pdfUrl: null,
+  figures: {},   // {filename: base64} from screenshot mode
 };
 
 /* ─── DOM refs ──────────────────────────────────────────────────────── */
@@ -128,7 +129,11 @@ function initDragDrop() {
     dropTarget.classList.remove('drag-over');
     handleFile(e.dataTransfer.files[0]);
   });
-  dropTarget.addEventListener('click', () => fileInput.click());
+  dropTarget.addEventListener('click', e => {
+    // label[for="file-input"] already triggers the input natively; skip to avoid double dialog
+    if (e.target.closest('label') || e.target === fileInput) return;
+    fileInput.click();
+  });
   dropTarget.addEventListener('keydown', e => {
     if (e.key === 'Enter' || e.key === ' ') fileInput.click();
   });
@@ -245,9 +250,13 @@ async function startConvert() {
   convertBtn.disabled = true;
   clearBtn.hidden = true;
   progressWrap.hidden = false;
+  state.figures = {};
+
+  const figureMode = document.querySelector('input[name="figure-mode"]:checked')?.value || 'draw';
 
   const formData = new FormData();
   formData.append('file', state.file);
+  formData.append('figure_mode', figureMode);
 
   let response;
   try {
@@ -285,15 +294,16 @@ async function startConvert() {
       const lines = buffer.split('\n');
       buffer = lines.pop();
 
-      let errorEventDetected = false;
+      let pendingEvent = null;
       for (const line of lines) {
-        if (line.startsWith('event: error')) {
-          errorEventDetected = true;
+        if (line.startsWith('event: ')) {
+          pendingEvent = line.slice(7).trim();
         } else if (line.startsWith('data: ')) {
           const raw = line.slice(6);
           if (!raw) continue;
-          if (errorEventDetected) {
-            errorEventDetected = false;
+
+          if (pendingEvent === 'error') {
+            pendingEvent = null;
             try {
               const err = JSON.parse(raw);
               showErrorModal('转换失败', err.message || '未知错误');
@@ -301,7 +311,16 @@ async function startConvert() {
             } catch {
               showErrorModal('转换失败', '发生未知错误');
             }
+          } else if (pendingEvent === 'images') {
+            pendingEvent = null;
+            try { state.figures = JSON.parse(raw); } catch { /* ignore */ }
+          } else if (pendingEvent === 'done') {
+            pendingEvent = null;
+            renderKatex();
+            progressWrap.hidden = true;
+            streamStatus.hidden = true;
           } else {
+            pendingEvent = null;
             const chunk = JSON.parse(raw);
             accumulated += chunk;
             if (state.editor) {
@@ -311,6 +330,7 @@ async function startConvert() {
             }
           }
         } else if (line.startsWith('event: done')) {
+          // fallback: event: done with no data line
           renderKatex();
           progressWrap.hidden = true;
           streamStatus.hidden = true;
@@ -365,7 +385,7 @@ async function compilePdf() {
     const resp = await fetch('/compile', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ latex }),
+      body: JSON.stringify({ latex, images: state.figures }),
     });
 
     if (resp.ok) {
@@ -451,6 +471,7 @@ function resetProgress() {
 
 function resetUpload() {
   state.file = null;
+  state.figures = {};
   fileInput.value = '';
   fileInfo.hidden = true;
   fileInfo.textContent = '';

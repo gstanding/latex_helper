@@ -244,3 +244,61 @@ def pdf_to_page_images(file_bytes: bytes) -> list[bytes]:
             )
         mat = fitz.Matrix(1.5, 1.5)  # ~110 DPI effective
         return [page.get_pixmap(matrix=mat).tobytes("png") for page in doc]
+
+
+def extract_pdf_figures(file_bytes: bytes) -> dict[str, bytes]:
+    """Extract embedded images from PDF. Returns {figureN.png: png_bytes} in document order.
+
+    Tries embedded raster XObjects first. Falls back to rendering drawing-heavy page regions
+    if no raster images are found. Skips images smaller than 64×64 px (icons/decorations).
+    """
+    import fitz
+
+    result: dict[str, bytes] = {}
+    counter = 1
+    MIN_DIM = 64
+
+    with fitz.open(stream=file_bytes, filetype="pdf") as doc:
+        seen_xrefs: set[int] = set()
+        any_embedded = False
+
+        for page in doc:
+            for img_info in page.get_images(full=True):
+                xref = img_info[0]
+                if xref in seen_xrefs:
+                    continue
+                seen_xrefs.add(xref)
+                try:
+                    pix = fitz.Pixmap(doc, xref)
+                    if pix.width < MIN_DIM or pix.height < MIN_DIM:
+                        continue
+                    if pix.colorspace and pix.colorspace.n > 3:
+                        pix = fitz.Pixmap(fitz.csRGB, pix)
+                    result[f"figure{counter}.png"] = pix.tobytes("png")
+                    counter += 1
+                    any_embedded = True
+                except Exception:
+                    continue
+
+        # Fallback: render each page that has substantial vector drawings
+        if not any_embedded:
+            mat = fitz.Matrix(2.0, 2.0)
+            for page in doc:
+                drawings = page.get_drawings()
+                if not drawings:
+                    continue
+                rects = [fitz.Rect(d["rect"]) for d in drawings if d.get("rect")]
+                if not rects:
+                    continue
+                combined = rects[0]
+                for r in rects[1:]:
+                    combined = combined | r
+                if combined.get_area() < 5000:
+                    continue
+                pix = page.get_pixmap(matrix=mat, clip=combined)
+                if pix.width < MIN_DIM or pix.height < MIN_DIM:
+                    continue
+                result[f"figure{counter}.png"] = pix.tobytes("png")
+                counter += 1
+
+    return result

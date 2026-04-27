@@ -38,6 +38,23 @@
       <input type="file" id="file-input" accept=".pdf,.png,.jpg,.jpeg,.gif,.webp">
     </div>
     <div id="file-info" hidden></div>
+
+    <div id="figure-mode-wrap">
+      <span class="figure-mode-label">图形处理：</span>
+      <label class="figure-mode-option">
+        <input type="radio" name="figure-mode" value="draw" checked>
+        <span>AI 绘制（TikZ）</span>
+      </label>
+      <label class="figure-mode-option">
+        <input type="radio" name="figure-mode" value="skip">
+        <span>跳过图形</span>
+      </label>
+      <label class="figure-mode-option">
+        <input type="radio" name="figure-mode" value="screenshot">
+        <span>截图引用</span>
+      </label>
+    </div>
+
     <div id="upload-actions">
       <button id="convert-btn" disabled>转换为 LaTeX</button>
       <button id="clear-btn" hidden>清除</button>
