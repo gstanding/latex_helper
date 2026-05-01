@@ -80,14 +80,16 @@ if figure_mode == "screenshot" and file_type == "pdf":
     figure_count = len(raw_figures)
     figures_b64 = {k: base64.b64encode(v).decode() for k, v in raw_figures.items()}
 
-# 1. 完整收集 LLM 输出（缓冲后处理）
-async for chunk in converter.stream_latex(..., figure_mode=figure_mode, figure_count=figure_count):
+# 1. LLM 流式输出时每 5s 发送 progress 事件（前端显示已生成字符数）
+async for chunk in converter.stream_latex(...):
     full_latex += chunk
+    if now - last_progress >= 5.0:
+        yield f"event: progress\ndata: {json.dumps({'chars': char_count})}\n\n"
 
 # 2. 后处理
 full_latex = postprocess_latex(full_latex)
 
-# 3. 分块推给前端
+# 3. 分块推给前端（512 字节/包）
 for i in range(0, len(full_latex), 512):
     yield f"data: {json.dumps(full_latex[i:i+512])}\n\n"
 
@@ -96,6 +98,23 @@ if figures_b64:
     yield f"event: images\ndata: {json.dumps(figures_b64)}\n\n"
 
 yield "event: done\ndata: \n\n"
+```
+
+**`/compile` 安全检查与结构化错误**：
+```python
+# 拒绝危险命令
+_DANGEROUS_LATEX = {r"\write18", r"\immediate\write"}
+for cmd in _DANGEROUS_LATEX:
+    if cmd in latex_source:
+        raise HTTPException(400, ...)
+
+# 自动检测 CJK 字符选择编译器
+_CJK_RE = re.compile(r"[一-鿿぀-ゟ가-힯]")
+def _needs_xelatex(src): return "ctex" in src or "xeCJK" in src or bool(_CJK_RE.search(src))
+
+# 编译失败返回结构化错误（含行号）
+parsed = _parse_latex_log(log_content)
+# → {"error": "Undefined control sequence \\foo", "line": 42, "log": "..."}
 ```
 
 **`/compile` PDF 有效性校验**（不用 returncode，因为 LaTeX warning 也会导致非零退出码）：
@@ -121,19 +140,23 @@ def _is_valid_pdf(path: str) -> bool:
 
 #### `postprocess_latex(latex: str) -> str` — 后处理器（重要）
 
-在每次转换后自动修复四类模型输出问题：
+在每次转换后自动修复五类模型输出问题（所有正则均为模块级预编译常量）：
 
-1. **自动补全未定义颜色**  
-   扫描 `\color{}`、`\textcolor{}`、TikZ 选项中所有颜色名，与 `\definecolor` 已声明的对比，对缺失的按名称关键词推断色值（`headerblue` → 深蓝，`textyellow` → 黄色等）自动插入 `\definecolor`
+1. **修正 `\tikzset` 位置**  
+   模型有时把 `\tikzset` 放在 `\usepackage{tikz}` 之前 → 自动移到正确位置
 
-2. **注释掉占位图片**  
-   `\includegraphics{xxx.png}` 如果引用的是本地不存在的文件（无绝对路径/子目录）→ 注释掉，避免编译报错
-
-3. **删除冗余 CJK 环境**  
+2. **删除冗余 CJK 环境**  
    使用 `ctexart/ctexbook` 时，模型有时会错误地加 `\begin{CJK*}...\end{CJK*}` → 自动删除
 
-4. **修正 `\tikzset` 位置**  
-   模型有时把 `\tikzset` 放在 `\usepackage{tikz}` 之前 → 自动移到正确位置
+3. **注释掉占位图片**  
+   `\includegraphics{xxx}` 如果引用的是本地不存在的文件（无绝对路径/子目录，且无 png/jpg/pdf 等后缀）→ 注释掉，避免编译报错；带图片后缀的文件（screenshot 模式提取的图）保留
+
+4. **自动补全未定义颜色**  
+   扫描 `\color{}`、`\textcolor{}`、TikZ 选项中所有颜色名，与 `\definecolor` 已声明的对比，对缺失的按名称关键词推断色值（`headerblue` → 深蓝，`textyellow` → 黄色等）自动插入 `\definecolor`
+
+5. **MiniMax 多页 preamble 合并**（`_merge_preamble_packages`）  
+   将 `\begin{document}` 内意外出现的 `\usepackage` 移到 preamble；去重 `\definecolor` 定义  
+   解决 MiniMax 多页拼接时后续页把包声明放在 body 里导致编译失败的问题
 
 ### `latex_helper/prompts.py` — System Prompt 要点
 
@@ -159,10 +182,11 @@ def _is_valid_pdf(path: str) -> bool:
 ### SSE 解析（转换流）
 ```javascript
 // 支持以下事件类型（pendingEvent 状态机解析）：
-// event: error   → data: {"message": "..."}  显示错误弹窗
-// event: images  → data: {filename: base64}  存入 state.figures（screenshot 模式）
-// event: done    → 触发 KaTeX 渲染，隐藏 spinner
-// 无 event 前缀   → data: "chunk"  累加到编辑器
+// event: progress → data: {"chars": N}       显示已生成字符数（每 5s 一次）
+// event: error    → data: {"message": "..."}  显示错误弹窗
+// event: images   → data: {filename: base64}  存入 state.figures（screenshot 模式）
+// event: done     → 触发 KaTeX 渲染，隐藏 spinner
+// 无 event 前缀    → data: "chunk"  用 editorAppend() 追加到编辑器
 ```
 
 ### 状态管理
@@ -173,6 +197,7 @@ const state = {
   pdflatexOk: false, // pdflatex 是否可用
   pdfUrl: null,      // 当前编译 PDF 的 blob URL（用于释放内存）
   figures: {},       // screenshot 模式下提取的图像 {filename: base64}
+  sseReader: null,   // 当前 SSE ReadableStreamDefaultReader（用于取消）
 };
 ```
 
@@ -180,13 +205,19 @@ const state = {
 
 | 函数 | 说明 |
 |---|---|
-| `startConvert()` | 上传文件，解析 SSE 流，显示转换中 spinner |
+| `startConvert()` | 上传文件，解析 SSE 流，支持取消（sseReader.cancel()） |
+| `cancelConvert()` | 取消正在进行的 SSE 转换，恢复上传状态 |
+| `editorAppend(chunk)` | 追加文本到 Monaco（via applyEdits，无全量重渲染） |
+| `editorGoToLine(line)` | Monaco 跳转到指定行（编译错误行号） |
 | `compilePdf()` | POST /compile，显示编译遮罩，成功后加载进 iframe |
 | `downloadTex()` | 弹出文件名输入框（默认 `documentyyMMddhhmmss`），下载 .tex |
-| `resetUpload()` | 重置回上传状态（重新上传按钮触发） |
+| `downloadPdf()` | 从 iframe src（blob URL）触发 PDF 下载 |
+| `triggerDownload(blob, filename)` | 通用下载辅助函数 |
+| `resetUpload()` | 重置回上传状态，清除 localStorage 草稿 |
+| `saveDraft()` / `checkDraft()` | 30s 自动保存编辑器内容到 localStorage，刷新后提示恢复 |
 | `showErrorModal(title, msg, log?)` | 统一错误弹窗，log 显示在 `<pre>` 块 |
 | `showInputModal(title, msg, default)` | 带输入框的弹窗，返回 Promise\<string\|null\> |
-| `postprocess_latex()` | 后端已处理，前端无需额外处理 |
+| `showConfirmModal(title, msg)` | 纯确认弹窗，返回 Promise\<boolean\> |
 
 ### PDF 预览
 编译成功后不打开新标签，而是加载进页面内的 `<iframe id="pdf-preview">` 并切换到 PDF 预览标签。
@@ -202,6 +233,9 @@ const state = {
 5. **`#stream-status` spinner 在页面加载时就显示** → CSS ID 选择器优先级高于 user-agent `[hidden]` 样式；改为 `display: none` 默认隐藏，通过 `:not([hidden])` 规则显示
 6. **上传文件时弹窗出现两次** → `<label for="file-input">` 原生触发 input，同时事件冒泡到 dropTarget 的 click 监听器再次调用 `fileInput.click()`；在 click 处理器中加 `e.target.closest('label')` 判断跳过
 7. **SSE 转换错误不可见于服务器日志** → uvicorn access log 只记录 HTTP 状态码，SSE 错误在响应体内；已在 `event_generator` 的 except 块加 `logger.error(..., exc_info=True)`，错误现在会出现在服务器控制台
+8. **`\includegraphics` 正则误伤 screenshot 图片** → 原正则误把选项 `[width=...]` 部分识别为文件名；改用 `_RE_INCLUDEGRAPHICS_FNAME` 精确提取 `{...}` 中的文件名，带图片后缀的文件不再被注释
+9. **图片 sanitize 删除字符导致扩展名丢失** → `re.sub(unsafe_chars, "", name)` 改为 `re.sub(unsafe_chars, "_", name)`，保留 `.` 使扩展名完整
+10. **screenshot 模式无图时 LLM 仍被告知有 1 张图** → `max(figure_count, 1)` 改为精确判断：`figure_count == 0` 时退回 skip 模式 prompt
 
 ---
 
@@ -225,4 +259,4 @@ Python 3.11（macOS 上用 `python3.11`，系统默认 python3 是 3.6 不可用
 
 - 仓库：`https://github.com/gstanding/latex_helper`
 - 主分支：`claude/analyze-doc2latex-conversion-GURWp`（当前工作分支，也是 main 的 PR 来源）
-- 最新 commit：Add figure mode toggle (draw/skip/screenshot) with PDF figure extraction
+- 最新 commit：Comprehensive reliability, security, and UX improvements (P0/P1/P2 batch)

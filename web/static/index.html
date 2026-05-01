@@ -41,15 +41,15 @@
 
     <div id="figure-mode-wrap">
       <span class="figure-mode-label">图形处理：</span>
-      <label class="figure-mode-option">
+      <label class="figure-mode-option" title="让 AI 用 TikZ 代码重绘数学图形，适合纯数学公式类图表">
         <input type="radio" name="figure-mode" value="draw" checked>
         <span>AI 绘制（TikZ）</span>
       </label>
-      <label class="figure-mode-option">
+      <label class="figure-mode-option" title="忽略所有图形，仅转换文字和公式">
         <input type="radio" name="figure-mode" value="skip">
         <span>跳过图形</span>
       </label>
-      <label class="figure-mode-option">
+      <label class="figure-mode-option" title="提取 PDF 中的原始图像并引用，适合含实物图/照片的文档">
         <input type="radio" name="figure-mode" value="screenshot">
         <span>截图引用</span>
       </label>
@@ -57,8 +57,10 @@
 
     <div id="upload-actions">
       <button id="convert-btn" disabled>转换为 LaTeX</button>
+      <button id="cancel-btn" hidden>✕ 取消</button>
       <button id="clear-btn" hidden>清除</button>
     </div>
+    <div id="progress-token" hidden></div>
     <div id="progress-wrap" hidden>
       <div id="progress-bar"><div id="progress-fill"></div></div>
       <span id="progress-label">转换中…</span>
@@ -92,6 +94,7 @@
       <div id="preview-tabs">
         <button class="tab-btn active" data-tab="katex">KaTeX 预览</button>
         <button class="tab-btn" data-tab="pdf" id="pdf-tab-btn">PDF 预览</button>
+        <button id="download-pdf-btn" hidden title="下载编译好的 PDF">⬇ PDF</button>
       </div>
       <div id="katex-preview" class="tab-content active"></div>
       <iframe id="pdf-preview" class="tab-content" src="about:blank" hidden></iframe>
