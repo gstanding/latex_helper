@@ -1,8 +1,10 @@
 import asyncio
 import base64
+import binascii
 import json
 import logging
 import os
+import re as _re
 import shutil
 import tempfile
 
@@ -31,9 +33,39 @@ def _is_valid_pdf(path: str) -> bool:
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
 from latex_helper.converter import get_converter, get_llm_info
 from latex_helper.utils import MAX_FILE_SIZE, detect_file_type, extract_pdf_figures, postprocess_latex
+
+_DANGEROUS_LATEX = {r"\write18", r"\immediate\write"}
+
+_CJK_RE = _re.compile(r"[一-鿿぀-ゟ가-힯]")
+
+
+def _needs_xelatex(src: str) -> bool:
+    return "ctex" in src or "xeCJK" in src or bool(_CJK_RE.search(src))
+
+
+def _parse_latex_log(log: str) -> dict:
+    """Extract first fatal error and line number from a pdflatex/xelatex log."""
+    error_msg = None
+    error_line = None
+    for i, line in enumerate(log.splitlines()):
+        if line.startswith("!"):
+            error_msg = line[1:].strip()
+            for j in range(i + 1, min(i + 15, len(log.splitlines()))):
+                lm = _re.match(r"^l\.(\d+)", log.splitlines()[j])
+                if lm:
+                    error_line = int(lm.group(1))
+                    break
+            break
+    return {"error": error_msg, "line": error_line}
+
+
+class CompileRequest(BaseModel):
+    latex: str
+    images: dict[str, str] = {}
 
 app = FastAPI(title="LaTeX Helper")
 
@@ -83,6 +115,9 @@ async def convert(
     async def event_generator():
         try:
             full_latex = ""
+            char_count = 0
+            last_progress = asyncio.get_event_loop().time()
+
             async for chunk in converter.stream_latex(
                 content,
                 file_type,
@@ -91,6 +126,11 @@ async def convert(
                 figure_count=figure_count,
             ):
                 full_latex += chunk
+                char_count += len(chunk)
+                now = asyncio.get_event_loop().time()
+                if now - last_progress >= 5.0:
+                    yield f"event: progress\ndata: {json.dumps({'chars': char_count})}\n\n"
+                    last_progress = now
 
             full_latex = postprocess_latex(full_latex)
 
@@ -98,7 +138,6 @@ async def convert(
             for i in range(0, len(full_latex), chunk_size):
                 yield f"data: {json.dumps(full_latex[i:i + chunk_size], ensure_ascii=False)}\n\n"
 
-            # Send extracted figure images for screenshot mode
             if figures_b64:
                 yield f"event: images\ndata: {json.dumps(figures_b64, ensure_ascii=False)}\n\n"
 
@@ -115,19 +154,22 @@ async def convert(
 
 
 @app.post("/compile")
-async def compile_latex(payload: dict):
-    latex_source: str = payload.get("latex", "")
-    images: dict = payload.get("images", {})  # {filename: base64_string}
+async def compile_latex(req: CompileRequest):
+    latex_source = req.latex
+    images = req.images
+
     if not latex_source.strip():
         raise HTTPException(400, detail="Empty LaTeX source.")
 
-    # Strip markdown code fences that AI models sometimes add
-    import re
-    latex_source = re.sub(r"^```(?:latex)?\s*\n?", "", latex_source.strip())
-    latex_source = re.sub(r"\n?```\s*$", "", latex_source.strip())
+    # Reject dangerous shell-escape commands
+    for cmd in _DANGEROUS_LATEX:
+        if cmd in latex_source:
+            raise HTTPException(400, detail=f"Unsafe LaTeX command detected: {cmd}")
 
-    # Convert page break markers to actual LaTeX \newpage
-    latex_source = re.sub(r"%\s*---?\s*Page\s+break\s*---?\s*\n", "\n\\newpage\n", latex_source, flags=re.IGNORECASE)
+    # Strip markdown code fences that AI models sometimes add
+    latex_source = _re.sub(r"^```(?:latex)?\s*\n?", "", latex_source.strip())
+    latex_source = _re.sub(r"\n?```\s*$", "", latex_source.strip())
+    latex_source = _re.sub(r"%\s*---?\s*Page\s+break\s*---?\s*\n", "\n\\newpage\n", latex_source, flags=_re.IGNORECASE)
 
     if not shutil.which("pdflatex") and not shutil.which("xelatex"):
         raise HTTPException(
@@ -140,9 +182,8 @@ async def compile_latex(payload: dict):
             ),
         )
 
-    # Use xelatex for CJK/ctex documents, pdflatex otherwise
-    uses_ctex = "ctex" in latex_source or "xeCJK" in latex_source
-    compiler = "xelatex" if (uses_ctex and shutil.which("xelatex")) else "pdflatex"
+    # Detect required compiler (CJK characters → xelatex)
+    compiler = "xelatex" if (_needs_xelatex(latex_source) and shutil.which("xelatex")) else "pdflatex"
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tex_path = os.path.join(tmpdir, "document.tex")
@@ -151,14 +192,18 @@ async def compile_latex(payload: dict):
 
         # Write embedded figure images so \includegraphics can resolve them
         for img_name, img_b64 in images.items():
-            safe = re.sub(r"[^a-zA-Z0-9._-]", "", img_name)
+            # Replace unsafe chars; keep extension
+            safe = _re.sub(r"[^a-zA-Z0-9._-]", "_", img_name)
             if not safe:
                 continue
             try:
+                img_bytes = base64.b64decode(img_b64, validate=True)
                 with open(os.path.join(tmpdir, safe), "wb") as f:
-                    f.write(base64.b64decode(img_b64))
+                    f.write(img_bytes)
+            except binascii.Error:
+                logger.warning("Invalid base64 for image %s — skipped", img_name)
             except Exception:
-                pass
+                logger.warning("Failed to write image %s — skipped", img_name, exc_info=True)
 
         async with aiofiles.open(tex_path, "w") as f:
             await f.write(latex_source)
@@ -174,28 +219,33 @@ async def compile_latex(payload: dict):
                 stderr=asyncio.subprocess.PIPE,
             )
             try:
-                await asyncio.wait_for(proc.communicate(), timeout=30.0)
+                await asyncio.wait_for(proc.communicate(), timeout=60.0)
             except asyncio.TimeoutError:
                 proc.kill()
+                await proc.wait()
                 raise HTTPException(
                     408,
-                    detail=json.dumps({"error": "timeout", "message": "pdflatex 编译超时（30s）。"}),
+                    detail=json.dumps({"error": "timeout", "message": "编译超时（60s）。"}),
                 )
         except FileNotFoundError:
             raise HTTPException(503, detail=json.dumps({"error": "pdflatex_not_found"}))
 
-        # 以 PDF magic bytes 验证输出文件，而不是依赖退出码：
-        # LaTeX 有 warning 时退出码也可能非零，但仍产生合法 PDF；
-        # 而致命错误可能留下残缺文件，退出码同样非零。
+        # Validate by PDF magic bytes rather than exit code (warnings → non-zero exit but valid PDF)
         if not _is_valid_pdf(pdf_path):
             log_content = ""
             if os.path.exists(log_path):
                 async with aiofiles.open(log_path, "r", errors="replace") as f:
                     log_content = await f.read()
+            parsed = _parse_latex_log(log_content)
             raise HTTPException(
                 422,
                 detail=json.dumps(
-                    {"error": "compilation_failed", "log": log_content[-4000:]}
+                    {
+                        "error": "compilation_failed",
+                        "message": parsed["error"] or "编译失败，请查看日志",
+                        "line": parsed["line"],
+                        "log": log_content[-4000:],
+                    }
                 ),
             )
 

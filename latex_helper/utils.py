@@ -3,6 +3,17 @@ import re
 
 PDF_PAGE_LIMIT = 100
 
+# Pre-compiled regexes used in post-processing (avoid recompiling on every call)
+_RE_TIKZSET = re.compile(r"\\tikzset\{[^}]*(?:\{[^}]*\}[^}]*)?\}")
+_RE_CJK_BEGIN = re.compile(r"\\begin\{CJK\*\}\{[^}]*\}\{[^}]*\}\n?")
+_RE_CJK_END = re.compile(r"\\end\{CJK\*\}\n?")
+_RE_INCLUDEGRAPHICS = re.compile(r"[^\n]*\\includegraphics[^\n]*\n?")
+_RE_INCLUDEGRAPHICS_FNAME = re.compile(r"\\includegraphics\s*(?:\[[^\]]*\])?\s*\{([^}]+)\}")
+_RE_DEFINECOLOR = re.compile(r"\\definecolor\{(\w+)\}")
+_RE_USEPACKAGE_BODY = re.compile(r"\\usepackage(?:\[[^\]]*\])?\{[^}]+\}\n?")
+_RE_USEPACKAGE_NAME = re.compile(r"\\usepackage(?:\[[^\]]*\])?\{([^}]+)\}")
+_RE_DEFINECOLOR_FULL = re.compile(r"\\definecolor\{(\w+)\}\{[^}]*\}\{[^}]*\}\n?")
+
 # ── LaTeX post-processor ──────────────────────────────────────────────────────
 
 _STD_COLORS = {
@@ -68,45 +79,91 @@ def _collect_used_colors(latex: str) -> set[str]:
     return used
 
 
+def _merge_preamble_packages(latex: str) -> str:
+    """Move \\usepackage commands found inside \\begin{document} to the preamble.
+    Also deduplicates \\definecolor definitions. Helps MiniMax multi-page output
+    where later pages may include package declarations inside their body.
+    """
+    doc_start_idx = latex.find(r"\begin{document}")
+    if doc_start_idx == -1:
+        return latex
+
+    preamble = latex[:doc_start_idx]
+    body = latex[doc_start_idx:]
+
+    existing_pkgs: set[str] = set(_RE_USEPACKAGE_NAME.findall(preamble))
+    extra_pkgs: list[str] = []
+
+    def _remove_body_pkg(m: re.Match) -> str:
+        nm = _RE_USEPACKAGE_NAME.search(m.group(0))
+        if nm:
+            for name in nm.group(1).split(","):
+                name = name.strip()
+                if name and name not in existing_pkgs:
+                    existing_pkgs.add(name)
+                    extra_pkgs.append(m.group(0).rstrip("\n"))
+        return ""
+
+    body = _RE_USEPACKAGE_BODY.sub(_remove_body_pkg, body)
+
+    if extra_pkgs:
+        preamble = preamble.rstrip("\n") + "\n" + "\n".join(extra_pkgs) + "\n"
+
+    # Deduplicate \definecolor definitions across the full document
+    seen_colors: set[str] = set()
+
+    def _dedup_color(m: re.Match) -> str:
+        name = m.group(1)
+        if name in seen_colors:
+            return ""
+        seen_colors.add(name)
+        return m.group(0)
+
+    return _RE_DEFINECOLOR_FULL.sub(_dedup_color, preamble + body)
+
+
 def postprocess_latex(latex: str) -> str:
     """
     Fix common model output issues that prevent compilation:
-    1. Auto-define any xcolor color names used but not declared.
+    1. Move any \\tikzset that appears before \\usepackage{tikz} to after it.
     2. Remove spurious \\begin{CJK*} / \\end{CJK*} inside ctex documents.
     3. Comment out \\includegraphics lines referencing non-embedded images.
-    4. Move any \\tikzset that appears before \\usepackage{tikz} to after it.
+    4. Auto-define any xcolor color names used but not declared.
+    5. Move stray \\usepackage from body to preamble and deduplicate \\definecolor.
     """
     # ── 1. Fix \tikzset before \usepackage{tikz} ────────────────────────────
     tikz_pkg = r"\usepackage{tikz}"
     if tikz_pkg in latex:
         before, after = latex.split(tikz_pkg, 1)
-        # Pull any \tikzset lines out of the preamble-before-tikz section
-        orphaned = re.findall(r"\\tikzset\{[^}]*(?:\{[^}]*\}[^}]*)?\}", before)
+        orphaned = _RE_TIKZSET.findall(before)
         if orphaned:
-            before = re.sub(r"\\tikzset\{[^}]*(?:\{[^}]*\}[^}]*)?\}\n?", "", before)
+            before = _RE_TIKZSET.sub("", before)
             after = "\n" + "\n".join(orphaned) + after
         latex = before + tikz_pkg + after
 
     # ── 2. Remove redundant CJK* environment (ctex handles encoding) ────────
     if r"\documentclass" in latex and ("ctexart" in latex or "ctexbook" in latex or "ctexrep" in latex):
-        latex = re.sub(r"\\begin\{CJK\*\}\{[^}]*\}\{[^}]*\}\n?", "", latex)
-        latex = re.sub(r"\\end\{CJK\*\}\n?", "", latex)
+        latex = _RE_CJK_BEGIN.sub("", latex)
+        latex = _RE_CJK_END.sub("", latex)
 
-    # ── 3. Comment out \includegraphics pointing to external/non-existent files
+    # ── 3. Comment out \includegraphics pointing to non-existent placeholder files
     def _comment_missing_image(m: re.Match) -> str:
         line = m.group(0)
-        # Keep if it references a clearly embedded/real path (absolute or relative with subdir)
-        filename = re.search(r"\{([^}]+)\}", line)
-        if filename:
-            p = filename.group(1)
-            if "/" in p or "\\" in p:   # absolute or subdir path — leave as-is
+        fname_m = _RE_INCLUDEGRAPHICS_FNAME.search(line)
+        if fname_m:
+            p = fname_m.group(1).strip()
+            # Keep: path with directory component
+            if "/" in p or p.startswith("\\"):
                 return line
-        return "% " + line          # placeholder filename — comment out
+            # Keep: filename with a recognised image extension (screenshot mode or explicit path)
+            if re.search(r"\.(png|jpg|jpeg|pdf|eps|svg|gif|webp)$", p, re.IGNORECASE):
+                return line
+        return "% " + line
 
-    latex = re.sub(r"[^\n]*\\includegraphics[^\n]*\n?", _comment_missing_image, latex)
+    latex = _RE_INCLUDEGRAPHICS.sub(_comment_missing_image, latex)
 
     # ── 4. Auto-define missing colors ───────────────────────────────────────
-    defined = set(re.findall(r"\\definecolor\{(\w+)\}", latex)) | _STD_COLORS
+    defined = set(_RE_DEFINECOLOR.findall(latex)) | _STD_COLORS
     used    = _collect_used_colors(latex)
     missing = used - defined
 
@@ -115,7 +172,6 @@ def postprocess_latex(latex: str) -> str:
             f"\\definecolor{{{name}}}{{RGB}}{{{_infer_rgb(name)}}}"
             for name in sorted(missing)
         )
-        # Insert right after \usepackage{xcolor}, or before \begin{document}
         if r"\usepackage{xcolor}" in latex:
             latex = latex.replace(
                 r"\usepackage{xcolor}",
@@ -128,6 +184,9 @@ def postprocess_latex(latex: str) -> str:
                 r"\usepackage{xcolor}" + "\n" + new_defs + "\n" + r"\begin{document}",
                 1,
             )
+
+    # ── 5. Merge stray \usepackage from body; deduplicate \definecolor ───────
+    latex = _merge_preamble_packages(latex)
 
     return latex
 MAX_FILE_SIZE = 20 * 1024 * 1024  # 20 MB

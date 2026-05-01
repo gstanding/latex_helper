@@ -62,10 +62,10 @@ _COMMON_TAIL = """
 
 
 def get_system_prompt(figure_mode: str = "draw", figure_count: int = 0) -> str:
-    if figure_mode == "skip":
+    if figure_mode == "screenshot" and figure_count > 0:
+        figure_rule = _FIGURE_RULE_SCREENSHOT_TMPL.format(count=figure_count)
+    elif figure_mode == "skip" or (figure_mode == "screenshot" and figure_count == 0):
         figure_rule = _FIGURE_RULE_SKIP
-    elif figure_mode == "screenshot":
-        figure_rule = _FIGURE_RULE_SCREENSHOT_TMPL.format(count=max(figure_count, 1))
     else:
         figure_rule = _FIGURE_RULE_DRAW
     return _COMMON_RULES + figure_rule + _COMMON_TAIL
