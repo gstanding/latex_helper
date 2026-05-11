@@ -7,7 +7,7 @@ from typing import AsyncIterator
 import anthropic
 import httpx
 
-from latex_helper.prompts import get_system_prompt
+from latex_helper.prompts import get_system_prompt, _FIX_SYSTEM_PROMPT, build_fix_message
 from latex_helper.utils import pdf_to_page_images, prepare_content_blocks
 
 
@@ -39,6 +39,9 @@ class LatexConverter(ABC):
         figure_count: int = 0,
     ) -> AsyncIterator[str]: ...
 
+    @abstractmethod
+    async def stream_fix(self, latex: str, log: str) -> AsyncIterator[str]: ...
+
 
 class AnthropicConverter(LatexConverter):
     def __init__(self, client: anthropic.AsyncAnthropic, model: str) -> None:
@@ -60,6 +63,17 @@ class AnthropicConverter(LatexConverter):
             max_tokens=8192,
             system=system_prompt,
             messages=[{"role": "user", "content": blocks}],
+        ) as stream:
+            async for text in stream.text_stream:
+                yield text
+
+
+    async def stream_fix(self, latex: str, log: str) -> AsyncIterator[str]:
+        async with self.client.messages.stream(
+            model=self.model,
+            max_tokens=8192,
+            system=_FIX_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": build_fix_message(latex, log)}],
         ) as stream:
             async for text in stream.text_stream:
                 yield text
@@ -137,6 +151,11 @@ class MinimaxVLMConverter(LatexConverter):
                 image_url=f"data:image/{fmt};base64,{b64}",
             )
             yield result
+
+
+    async def stream_fix(self, latex: str, log: str) -> AsyncIterator[str]:
+        raise RuntimeError("MiniMax VLM 路径不支持自动修复，请切换到 Anthropic provider。")
+        yield  # make this an async generator
 
 
 def get_converter() -> LatexConverter:

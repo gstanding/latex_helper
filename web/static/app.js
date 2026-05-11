@@ -284,6 +284,32 @@ function showInputModal(title, message, defaultValue = '') {
   });
 }
 
+// Compile-error modal: shows [关闭] + [🔧 自动修复]. Returns true if user chose fix.
+function showCompileErrorModal(title, message, log = null) {
+  return new Promise(resolve => {
+    _modalResolve = resolve;
+    modalTitle.textContent = title;
+    modalBody.innerHTML = '';
+    modalBody.className = 'is-error';
+
+    const p = document.createElement('p');
+    p.textContent = message;
+    modalBody.appendChild(p);
+
+    if (log) {
+      const pre = document.createElement('pre');
+      pre.textContent = log;
+      modalBody.appendChild(pre);
+    }
+
+    modalInput.hidden = true;
+    modalCancel.hidden = false;
+    modalCancel.textContent = '关闭';
+    modalConfirm.textContent = '🔧 自动修复';
+    modalOverlay.hidden = false;
+  });
+}
+
 function closeModal(value) {
   modalOverlay.hidden = true;
   if (_modalResolve) {
@@ -437,6 +463,42 @@ function renderKatex() {
 }
 
 /* ─── PDF compilation ───────────────────────────────────────────────── */
+
+// Low-level compile: returns { ok, blob?, message?, log?, line? }
+async function _doCompile(latex, images) {
+  try {
+    const resp = await fetch('/compile', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ latex, images }),
+    });
+    if (resp.ok) {
+      return { ok: true, blob: await resp.blob() };
+    }
+    const detail = await resp.json().catch(() => ({ message: resp.statusText }));
+    let parsed = detail;
+    if (typeof detail.detail === 'string') {
+      try { parsed = JSON.parse(detail.detail); } catch { parsed = { message: detail.detail }; }
+    }
+    return {
+      ok: false,
+      message: parsed.message || `编译失败（HTTP ${resp.status}）`,
+      log: parsed.log || '',
+      line: parsed.line || null,
+    };
+  } catch (e) {
+    return { ok: false, message: e.message, log: '', line: null };
+  }
+}
+
+function _applyPdf(blob) {
+  if (state.pdfUrl) URL.revokeObjectURL(state.pdfUrl);
+  state.pdfUrl = URL.createObjectURL(blob);
+  pdfPreview.src = state.pdfUrl;
+  downloadPdfBtn.hidden = false;
+  switchTab('pdf');
+}
+
 async function compilePdf() {
   if (!state.pdflatexOk) {
     showErrorModal('pdflatex 不可用', '服务器未安装 pdflatex，请安装 TeX Live 后重试。');
@@ -451,37 +513,97 @@ async function compilePdf() {
   compileLog.hidden = true;
   downloadPdfBtn.hidden = true;
 
-  try {
-    const resp = await fetch('/compile', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ latex, images: state.figures }),
-    });
+  const result = await _doCompile(latex, state.figures);
+  compileOverlay.hidden = true;
+  compileBtn.disabled = false;
 
-    if (resp.ok) {
-      const blob = await resp.blob();
-      if (state.pdfUrl) URL.revokeObjectURL(state.pdfUrl);
-      state.pdfUrl = URL.createObjectURL(blob);
-      pdfPreview.src = state.pdfUrl;
-      downloadPdfBtn.hidden = false;
-      switchTab('pdf');
-    } else {
-      const detail = await resp.json().catch(() => ({ message: resp.statusText }));
-      let parsed = detail;
-      if (typeof detail.detail === 'string') {
-        try { parsed = JSON.parse(detail.detail); } catch { parsed = { message: detail.detail }; }
+  if (result.ok) {
+    _applyPdf(result.blob);
+  } else {
+    if (result.line) editorGoToLine(result.line);
+    const fix = await showCompileErrorModal('编译失败', result.message, result.log);
+    if (fix) autoFix(latex, result.log, state.figures, 1, 3);
+  }
+}
+
+/* ─── Auto-fix ──────────────────────────────────────────────────────── */
+
+// Stream /fix SSE → returns fixed LaTeX string, or null on error.
+async function _streamFix(latex, log, images) {
+  const resp = await fetch('/fix', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ latex, log, images }),
+  });
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error(err.detail || `修复请求失败（HTTP ${resp.status}）`);
+  }
+
+  if (state.editor) state.editor.setValue('');
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '', accumulated = '', errFlag = false;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop();
+
+    for (const line of lines) {
+      if (line.startsWith('event: error')) { errFlag = true; continue; }
+      if (!line.startsWith('data: ')) continue;
+      const raw = line.slice(6);
+      if (!raw) continue;
+      if (errFlag) {
+        errFlag = false;
+        const err = JSON.parse(raw);
+        throw new Error(err.message || '修复失败');
       }
-      const msg = parsed.message || `编译失败（HTTP ${resp.status}）`;
-      const log = parsed.log || null;
-      // Jump to error line in editor if available
-      if (parsed.line) editorGoToLine(parsed.line);
-      showErrorModal('编译失败', msg, log);
+      const chunk = JSON.parse(raw);
+      accumulated += chunk;
+      editorAppend(chunk);
     }
+  }
+  return accumulated;
+}
+
+async function autoFix(latex, log, images, attempt, maxAttempts) {
+  streamStatus.textContent = `🔧 修复中… ${attempt}/${maxAttempts}`;
+  streamStatus.hidden = false;
+  compileBtn.disabled = true;
+
+  let fixedLatex;
+  try {
+    fixedLatex = await _streamFix(latex, log, images);
   } catch (e) {
-    showErrorModal('网络错误', e.message);
-  } finally {
-    compileOverlay.hidden = true;
+    streamStatus.hidden = true;
     compileBtn.disabled = false;
+    showErrorModal('自动修复出错', e.message);
+    return;
+  }
+
+  streamStatus.textContent = `🔧 重新编译… ${attempt}/${maxAttempts}`;
+  compileOverlay.hidden = false;
+  const result = await _doCompile(fixedLatex, images);
+  compileOverlay.hidden = true;
+  streamStatus.hidden = true;
+  compileBtn.disabled = false;
+
+  if (result.ok) {
+    _applyPdf(result.blob);
+  } else if (attempt < maxAttempts) {
+    if (result.line) editorGoToLine(result.line);
+    const fix = await showCompileErrorModal(
+      `修复后仍然失败（${attempt}/${maxAttempts}）`,
+      result.message,
+      result.log
+    );
+    if (fix) autoFix(fixedLatex, result.log, images, attempt + 1, maxAttempts);
+  } else {
+    showErrorModal(`自动修复失败（已尝试 ${maxAttempts} 次）`, result.message || '编译失败', result.log);
   }
 }
 

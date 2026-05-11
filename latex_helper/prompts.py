@@ -71,5 +71,32 @@ def get_system_prompt(figure_mode: str = "draw", figure_count: int = 0) -> str:
     return _COMMON_RULES + figure_rule + _COMMON_TAIL
 
 
+_FIX_SYSTEM_PROMPT = """\
+You are an expert LaTeX typesetter. Fix the provided LaTeX document so it compiles \
+successfully with pdflatex or xelatex.
+
+Rules:
+- Output ONLY the corrected LaTeX source code. No explanations, no markdown code fences.
+- Preserve all content and structure from the original document.
+- Only change what is necessary to fix the compilation error(s) shown in the log.
+- The output must be a complete, self-contained LaTeX document.\
+"""
+
+
+def build_fix_message(latex: str, log: str) -> str:
+    log_excerpt = log[-3000:] if len(log) > 3000 else log
+    return (
+        "The following LaTeX document failed to compile.\n\n"
+        "=== pdflatex ERROR LOG ===\n"
+        f"{log_excerpt}\n"
+        "=== END LOG ===\n\n"
+        "=== LATEX SOURCE ===\n"
+        f"{latex}\n"
+        "=== END SOURCE ===\n\n"
+        "Fix the LaTeX so it compiles successfully. Output ONLY the corrected LaTeX source."
+    )
+
+
 # Default prompt (backward compat)
 SYSTEM_PROMPT = get_system_prompt("draw")
+

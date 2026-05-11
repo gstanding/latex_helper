@@ -67,6 +67,12 @@ class CompileRequest(BaseModel):
     latex: str
     images: dict[str, str] = {}
 
+
+class FixRequest(BaseModel):
+    latex: str
+    log: str = ""
+    images: dict[str, str] = {}
+
 app = FastAPI(title="LaTeX Helper")
 
 _STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
@@ -256,6 +262,36 @@ async def compile_latex(req: CompileRequest):
         content=pdf_bytes,
         media_type="application/pdf",
         headers={"Content-Disposition": "inline; filename=document.pdf"},
+    )
+
+
+@app.post("/fix")
+async def fix_latex(req: FixRequest):
+    if not req.latex.strip():
+        raise HTTPException(400, detail="Empty LaTeX source.")
+
+    converter = get_converter()
+
+    async def event_generator():
+        try:
+            full_latex = ""
+            async for chunk in converter.stream_fix(req.latex, req.log):
+                full_latex += chunk
+
+            full_latex = postprocess_latex(full_latex)
+
+            chunk_size = 512
+            for i in range(0, len(full_latex), chunk_size):
+                yield f"data: {json.dumps(full_latex[i:i + chunk_size], ensure_ascii=False)}\n\n"
+            yield "event: done\ndata: \n\n"
+        except Exception as e:
+            logger.error("Fix error: %s", e, exc_info=True)
+            yield f"event: error\ndata: {json.dumps({'message': str(e)})}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
 
