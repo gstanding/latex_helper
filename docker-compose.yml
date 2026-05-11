@@ -1,0 +1,21 @@
+services:
+  app:
+    build: .
+    ports:
+      - "${PORT:-8000}:8000"
+    environment:
+      # Anthropic (default provider)
+      - ANTHROPIC_API_KEY
+      - LLM_MODEL
+      # MiniMax (set LLM_PROVIDER=minimax to use)
+      - LLM_PROVIDER
+      - MINIMAX_API_KEY
+      - MINIMAX_API_HOST
+      - MINIMAX_TEXT_MODEL
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/llm')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
