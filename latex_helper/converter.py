@@ -26,6 +26,7 @@ def _extract_body(latex: str) -> str:
 _ANTHROPIC_DEFAULT_MODEL = "claude-sonnet-4-6"
 _MINIMAX_DEFAULT_HOST = "https://api.minimaxi.com"
 _MINIMAX_VLM_PATH = "/v1/coding_plan/vlm"
+_MINIMAX_DEFAULT_TEXT_MODEL = "MiniMax-M2.7"
 
 
 class LatexConverter(ABC):
@@ -80,27 +81,30 @@ class AnthropicConverter(LatexConverter):
 
 
 class MinimaxVLMConverter(LatexConverter):
-    """Calls MiniMax VLM REST API directly (same endpoint used by the MiniMax MCP server)."""
+    """VLM endpoint for image→LaTeX; Anthropic-compatible text model for fix."""
 
-    def __init__(self, api_key: str, api_host: str) -> None:
+    def __init__(self, api_key: str, api_host: str, text_model: str) -> None:
         self.api_key = api_key
         self.api_host = api_host.rstrip("/")
+        self.text_model = text_model
+        # MiniMax M-series is Anthropic-API-compatible; base_url points at their v1 prefix.
+        self._text_client = anthropic.AsyncAnthropic(
+            api_key=api_key,
+            base_url=f"{self.api_host}/v1",
+        )
 
-    async def _call_vlm(self, prompt: str, image_url: str | None = None) -> str:
+    async def _call_vlm(self, prompt: str, image_url: str) -> str:
         url = f"{self.api_host}{_MINIMAX_VLM_PATH}"
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "MM-API-Source": "Minimax-MCP",
             "Content-Type": "application/json",
         }
-        body: dict = {"prompt": prompt}
-        if image_url is not None:
-            body["image_url"] = image_url
         async with httpx.AsyncClient(timeout=httpx.Timeout(connect=30.0, read=300.0, write=60.0, pool=10.0)) as client:
             resp = await client.post(
                 url,
                 headers=headers,
-                json=body,
+                json={"prompt": prompt, "image_url": image_url},
             )
             resp.raise_for_status()
             data = resp.json()
@@ -157,9 +161,14 @@ class MinimaxVLMConverter(LatexConverter):
 
 
     async def stream_fix(self, latex: str, log: str) -> AsyncIterator[str]:
-        prompt = _FIX_SYSTEM_PROMPT + "\n\n" + build_fix_message(latex, log)
-        result = await self._call_vlm(prompt=prompt)
-        yield result
+        async with self._text_client.messages.stream(
+            model=self.text_model,
+            max_tokens=8192,
+            system=_FIX_SYSTEM_PROMPT,
+            messages=[{"role": "user", "content": build_fix_message(latex, log)}],
+        ) as stream:
+            async for text in stream.text_stream:
+                yield text
 
 
 def get_converter() -> LatexConverter:
@@ -170,7 +179,8 @@ def get_converter() -> LatexConverter:
         if not api_key:
             raise EnvironmentError("MINIMAX_API_KEY environment variable is not set.")
         api_host = os.getenv("MINIMAX_API_HOST", _MINIMAX_DEFAULT_HOST)
-        return MinimaxVLMConverter(api_key=api_key, api_host=api_host)
+        text_model = os.getenv("MINIMAX_TEXT_MODEL", _MINIMAX_DEFAULT_TEXT_MODEL)
+        return MinimaxVLMConverter(api_key=api_key, api_host=api_host, text_model=text_model)
 
     # Default: Anthropic
     api_key = os.getenv("ANTHROPIC_API_KEY")
@@ -184,6 +194,7 @@ def get_converter() -> LatexConverter:
 def get_llm_info() -> dict:
     provider = os.getenv("LLM_PROVIDER", "anthropic").lower()
     if provider == "minimax":
-        return {"provider": "minimax", "model": "minimax-vlm"}
+        text_model = os.getenv("MINIMAX_TEXT_MODEL", _MINIMAX_DEFAULT_TEXT_MODEL)
+        return {"provider": "minimax", "vlm": "minimax-vlm", "text_model": text_model}
     model = os.getenv("LLM_MODEL") or _ANTHROPIC_DEFAULT_MODEL
     return {"provider": "anthropic", "model": model}
