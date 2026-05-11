@@ -86,18 +86,21 @@ class MinimaxVLMConverter(LatexConverter):
         self.api_key = api_key
         self.api_host = api_host.rstrip("/")
 
-    async def _call_vlm(self, prompt: str, image_url: str) -> str:
+    async def _call_vlm(self, prompt: str, image_url: str | None = None) -> str:
         url = f"{self.api_host}{_MINIMAX_VLM_PATH}"
         headers = {
             "Authorization": f"Bearer {self.api_key}",
             "MM-API-Source": "Minimax-MCP",
             "Content-Type": "application/json",
         }
+        body: dict = {"prompt": prompt}
+        if image_url is not None:
+            body["image_url"] = image_url
         async with httpx.AsyncClient(timeout=httpx.Timeout(connect=30.0, read=300.0, write=60.0, pool=10.0)) as client:
             resp = await client.post(
                 url,
                 headers=headers,
-                json={"prompt": prompt, "image_url": image_url},
+                json=body,
             )
             resp.raise_for_status()
             data = resp.json()
@@ -154,8 +157,9 @@ class MinimaxVLMConverter(LatexConverter):
 
 
     async def stream_fix(self, latex: str, log: str) -> AsyncIterator[str]:
-        raise RuntimeError("MiniMax VLM 路径不支持自动修复，请切换到 Anthropic provider。")
-        yield  # make this an async generator
+        prompt = _FIX_SYSTEM_PROMPT + "\n\n" + build_fix_message(latex, log)
+        result = await self._call_vlm(prompt=prompt)
+        yield result
 
 
 def get_converter() -> LatexConverter:
