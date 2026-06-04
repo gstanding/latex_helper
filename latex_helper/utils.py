@@ -13,6 +13,12 @@ _RE_DEFINECOLOR = re.compile(r"\\definecolor\{(\w+)\}")
 _RE_USEPACKAGE_BODY = re.compile(r"\\usepackage(?:\[[^\]]*\])?\{[^}]+\}\n?")
 _RE_USEPACKAGE_NAME = re.compile(r"\\usepackage(?:\[[^\]]*\])?\{([^}]+)\}")
 _RE_DEFINECOLOR_FULL = re.compile(r"\\definecolor\{(\w+)\}\{[^}]*\}\{[^}]*\}\n?")
+# Strip M3 VLM's leaked chain-of-thought blocks (full pair or orphan tags on a line by themselves).
+_RE_THINK_FULL = re.compile(r"<think>.*?</think>", flags=re.DOTALL)
+_RE_THINK_OPEN_LINE = re.compile(r"^\s*<think>\s*$", flags=re.MULTILINE)
+_RE_THINK_CLOSE_LINE = re.compile(r"^\s*</think>\s*$", flags=re.MULTILINE)
+# Strip markdown code fences that occasionally wrap the LaTeX output.
+_RE_MD_FENCE = re.compile(r"^\s*```[a-zA-Z]*\s*$", flags=re.MULTILINE)
 
 # ── LaTeX post-processor ──────────────────────────────────────────────────────
 
@@ -125,12 +131,18 @@ def _merge_preamble_packages(latex: str) -> str:
 def postprocess_latex(latex: str) -> str:
     """
     Fix common model output issues that prevent compilation:
+    0. Strip M3 VLM's leaked <think>...</think> chain-of-thought blocks and stray markdown code fences.
     1. Move any \\tikzset that appears before \\usepackage{tikz} to after it.
     2. Remove spurious \\begin{CJK*} / \\end{CJK*} inside ctex documents.
     3. Comment out \\includegraphics lines referencing non-embedded images.
     4. Auto-define any xcolor color names used but not declared.
     5. Move stray \\usepackage from body to preamble and deduplicate \\definecolor.
     """
+    # ── 0. Strip leaked reasoning + markdown fences ─────────────────────────
+    latex = _RE_THINK_FULL.sub("", latex)
+    latex = _RE_THINK_OPEN_LINE.sub("", latex)
+    latex = _RE_THINK_CLOSE_LINE.sub("", latex)
+    latex = _RE_MD_FENCE.sub("", latex)
     # ── 1. Fix \tikzset before \usepackage{tikz} ────────────────────────────
     tikz_pkg = r"\usepackage{tikz}"
     if tikz_pkg in latex:
