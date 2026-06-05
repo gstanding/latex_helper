@@ -35,7 +35,7 @@ from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from latex_helper.converter import get_converter, get_llm_info
+from latex_helper.converter import get_available_converters, get_converter, get_llm_info
 from latex_helper.utils import MAX_FILE_SIZE, detect_file_type, extract_pdf_figures, postprocess_latex
 
 _DANGEROUS_LATEX = {r"\write18", r"\immediate\write"}
@@ -91,6 +91,7 @@ _VALID_FIGURE_MODES = {"draw", "skip", "screenshot"}
 async def convert(
     file: UploadFile = File(...),
     figure_mode: str = Form("draw"),
+    converter: str = Form(""),
 ):
     content = await file.read()
 
@@ -116,7 +117,7 @@ async def convert(
             for name, data in raw_figures.items()
         }
 
-    converter = get_converter()
+    converter_instance = get_converter(converter or None)
 
     async def event_generator():
         try:
@@ -124,7 +125,7 @@ async def convert(
             char_count = 0
             last_progress = asyncio.get_event_loop().time()
 
-            async for chunk in converter.stream_latex(
+            async for chunk in converter_instance.stream_latex(
                 content,
                 file_type,
                 file.filename or "",
@@ -270,12 +271,12 @@ async def fix_latex(req: FixRequest):
     if not req.latex.strip():
         raise HTTPException(400, detail="Empty LaTeX source.")
 
-    converter = get_converter()
+    fix_converter = get_converter()
 
     async def event_generator():
         try:
             full_latex = ""
-            async for chunk in converter.stream_fix(req.latex, req.log):
+            async for chunk in fix_converter.stream_fix(req.latex, req.log):
                 full_latex += chunk
 
             full_latex = postprocess_latex(full_latex)
@@ -307,3 +308,8 @@ async def health_pdflatex():
 @app.get("/health/llm")
 async def health_llm():
     return get_llm_info()
+
+
+@app.get("/health/converters")
+async def health_converters():
+    return get_available_converters()

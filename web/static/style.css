@@ -116,6 +116,15 @@ html, body {
   white-space: nowrap;
 }
 
+/* Converter selector (same layout as figure-mode-wrap) */
+#converter-wrap {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  flex-wrap: wrap;
+  font-size: 13px;
+}
+
 #upload-actions { display: flex; gap: 10px; align-items: center; }
 
 #cancel-btn {

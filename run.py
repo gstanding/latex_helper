@@ -2,6 +2,9 @@ import os
 import sys
 
 import uvicorn
+from dotenv import load_dotenv
+
+load_dotenv()
 
 if __name__ == "__main__":
     provider = os.getenv("LLM_PROVIDER", "anthropic").lower()

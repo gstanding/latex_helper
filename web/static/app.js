@@ -4,8 +4,9 @@ const state = {
   editor: null,
   pdflatexOk: false,
   pdfUrl: null,
-  figures: {},     // {filename: base64} from screenshot mode
-  sseReader: null, // active SSE reader (for cancellation)
+  figures: {},        // {filename: base64} from screenshot mode
+  sseReader: null,    // active SSE reader (for cancellation)
+  selectedConverter: '', // '' = use server default
 };
 
 /* ─── DOM refs ──────────────────────────────────────────────────────── */
@@ -20,6 +21,8 @@ const progressWrap    = $('progress-wrap');
 const progressToken   = $('progress-token');
 const uploadSection   = $('upload-section');
 const editorSection   = $('editor-section');
+const converterWrap   = $('converter-wrap');
+const figureModeWrap  = $('figure-mode-wrap');
 const monacoContainer = $('monaco-container');
 const katexPreview    = $('katex-preview');
 const pdfPreview      = $('pdf-preview');
@@ -55,13 +58,63 @@ let _modalResolve  = null;
 
 async function fetchLlmInfo() {
   try {
-    const r = await fetch('/health/llm');
-    const { provider, model } = await r.json();
-    const label = `${provider} / ${model}`;
-    llmBadge.textContent = label;
-    footerLlm.textContent = `LLM: ${label}`;
+    const r = await fetch('/health/converters');
+    const { default: defaultId, converters } = await r.json();
+
+    // Update badge to reflect server default
+    const defaultInfo = converters.find(c => c.id === defaultId) || converters[0];
+    if (defaultInfo) {
+      llmBadge.textContent = defaultInfo.label;
+      footerLlm.textContent = `引擎: ${defaultInfo.label}`;
+    } else {
+      llmBadge.textContent = 'offline';
+    }
+
+    // Build converter selector only when 2+ converters are configured
+    if (converters.length > 1) {
+      converterWrap.innerHTML = '<span class="figure-mode-label">转换引擎：</span>';
+      converters.forEach(c => {
+        const label = document.createElement('label');
+        label.className = 'figure-mode-option';
+        label.title = _converterTooltip(c);
+        const radio = document.createElement('input');
+        radio.type = 'radio';
+        radio.name = 'converter';
+        radio.value = c.id;
+        radio.checked = c.id === defaultId;
+        radio.addEventListener('change', () => onConverterChange(c.id));
+        const span = document.createElement('span');
+        span.textContent = c.label;
+        label.appendChild(radio);
+        label.appendChild(span);
+        converterWrap.appendChild(label);
+      });
+      converterWrap.hidden = false;
+      state.selectedConverter = defaultId;
+      // Apply initial figure-mode visibility
+      onConverterChange(defaultId, /* silent */ true);
+    }
   } catch {
     llmBadge.textContent = 'offline';
+  }
+}
+
+function _converterTooltip(c) {
+  if (c.type === 'ocr') return 'SimpleTex 专用 OCR，精准识别数学公式';
+  if (c.type === 'vlm') return 'MiniMax 视觉语言模型，支持图文混排';
+  return 'Anthropic Claude 大模型，支持复杂文档转换';
+}
+
+function onConverterChange(id, silent = false) {
+  state.selectedConverter = id;
+  // SimpleTex is formula OCR only — figure-mode options don't apply
+  figureModeWrap.hidden = (id === 'simpletex');
+  if (!silent) {
+    const info = converterWrap.querySelector(`input[value="${id}"]`)?.closest('label')?.querySelector('span');
+    if (info) {
+      llmBadge.textContent = info.textContent;
+      footerLlm.textContent = `引擎: ${info.textContent}`;
+    }
   }
 }
 
@@ -335,6 +388,7 @@ async function startConvert() {
   const formData = new FormData();
   formData.append('file', state.file);
   formData.append('figure_mode', figureMode);
+  if (state.selectedConverter) formData.append('converter', state.selectedConverter);
 
   let response;
   try {

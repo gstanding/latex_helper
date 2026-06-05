@@ -5,3 +5,4 @@ uvicorn[standard]>=0.32.0
 python-multipart>=0.0.12
 pymupdf>=1.25.0
 aiofiles>=24.1.0
+python-dotenv>=1.0.0
