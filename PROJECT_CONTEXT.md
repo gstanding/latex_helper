@@ -237,7 +237,7 @@ const state = {
 8. **`\includegraphics` 正则误伤 screenshot 图片** → 原正则误把选项 `[width=...]` 部分识别为文件名；改用 `_RE_INCLUDEGRAPHICS_FNAME` 精确提取 `{...}` 中的文件名，带图片后缀的文件不再被注释
 9. **图片 sanitize 删除字符导致扩展名丢失** → `re.sub(unsafe_chars, "", name)` 改为 `re.sub(unsafe_chars, "_", name)`，保留 `.` 使扩展名完整
 10. **screenshot 模式无图时 LLM 仍被告知有 1 张图** → `max(figure_count, 1)` 改为精确判断：`figure_count == 0` 时退回 skip 模式 prompt
-11. **MiniMax VLM 接口迁移至标准 chat completions API** → 原接口 `/v1/coding_plan/vlm` 为非标准端点，每次只接受一张图，多页 PDF 需串行调用；改为 `/v1/chat/completions`（OpenAI vision 格式），多页 PDF 一次请求批量传入全部页图片，减少 API 调用次数，也消除了逐页拼接 LaTeX 的复杂度。同步将 `MINIMAX_TEXT_MODEL` 默认值从 `MiniMax-M2.7` 升级为 `minimax-m3`，vision 与 fix 共用同一模型。删除了已无用的 `_strip_end_document` / `_extract_body` 死函数及 `import re`。
+11. **MiniMax VLM 接口迁移至标准 chat completions API** → 原接口 `/v1/coding_plan/vlm` 为非标准端点，每次只接受一张图，多页 PDF 需串行调用；改为 `/v1/chat/completions`（OpenAI vision 格式），多页 PDF 一次请求批量传入全部页图片，减少 API 调用次数，也消除了逐页拼接 LaTeX 的复杂度。同步将 `MINIMAX_TEXT_MODEL` 默认值从 `MiniMax-M2.7` 升级为 `minimax-m3`，vision 与 fix 共用同一模型。注: `_strip_end_document` / `_extract_body` 仍被 `SimpletexConverter` 路径 (`_assemble_simpletex_document`) 使用,SimpleTex 公式 OCR 路径在 `get_converter` 仍注册,这两个函数与 `import re` 均保留,本条历史决策不构成删除。
 
 ---
 
