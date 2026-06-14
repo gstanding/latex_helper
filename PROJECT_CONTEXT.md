@@ -4,7 +4,7 @@
 
 **LaTeX Helper** 是一个将 PDF / 图片文档自动转换为 LaTeX 源码并支持在线编译的 Web 工具。
 - 本地运行，通过浏览器访问
-- 支持 Anthropic（Claude）和 MiniMax VLM 两种 LLM 后端
+- 支持 Anthropic（Claude）和 MiniMax M3 两种 LLM 后端
 - 转换结果可在 Monaco 编辑器中编辑，支持 KaTeX 预览和 pdflatex/xelatex 编译
 
 ---
@@ -14,7 +14,7 @@
 | 层 | 技术 |
 |---|---|
 | 后端 | Python 3.11, FastAPI, uvicorn, aiofiles |
-| LLM | Anthropic SDK (`anthropic`) / MiniMax VLM REST API |
+| LLM | Anthropic SDK (`anthropic`) / MiniMax M3 REST API（`/v1/chat/completions`，OpenAI vision 格式） |
 | PDF 处理 | PyMuPDF (`fitz`) |
 | 前端 | 纯 HTML/CSS/JS，Monaco Editor（CDN），KaTeX（CDN） |
 | LaTeX 编译 | 系统安装的 pdflatex / xelatex（TeX Live） |
@@ -51,7 +51,8 @@ ANTHROPIC_API_KEY=xxx python3.11 run.py
 LLM_PROVIDER=minimax MINIMAX_API_KEY=xxx python3.11 run.py
 
 # 可选环境变量
-LLM_MODEL=claude-opus-4-7        # 覆盖默认模型
+LLM_MODEL=claude-opus-4-7        # 覆盖默认模型（Anthropic）
+MINIMAX_TEXT_MODEL=minimax-m3    # 覆盖 MiniMax 模型（默认 minimax-m3）
 MINIMAX_API_HOST=https://...      # 覆盖 MiniMax host
 ```
 
@@ -128,7 +129,7 @@ def _is_valid_pdf(path: str) -> bool:
 ### `latex_helper/converter.py` — LLM 调用
 
 - `AnthropicConverter`：用 Anthropic SDK，原生 PDF block，真正流式
-- `MinimaxVLMConverter`：把 PDF 每页渲染成 PNG，逐页调用 MiniMax VLM REST API，每页返回完整 LaTeX，多页拼接
+- `MinimaxVLMConverter`：把 PDF 全部页渲染成 PNG，**单次**调用 `/v1/chat/completions`（OpenAI vision 格式，`image_url` content block），多页时一次请求批量传入所有图，模型直接输出一份完整 LaTeX；单图场景同理。使用的模型同时承担 fix 任务（默认 `minimax-m3`，通过 `MINIMAX_TEXT_MODEL` 覆盖）。
 - `get_converter()` 根据 `LLM_PROVIDER` 环境变量自动选择
 
 ### `latex_helper/utils.py` — 工具函数
@@ -154,9 +155,9 @@ def _is_valid_pdf(path: str) -> bool:
 4. **自动补全未定义颜色**  
    扫描 `\color{}`、`\textcolor{}`、TikZ 选项中所有颜色名，与 `\definecolor` 已声明的对比，对缺失的按名称关键词推断色值（`headerblue` → 深蓝，`textyellow` → 黄色等）自动插入 `\definecolor`
 
-5. **MiniMax 多页 preamble 合并**（`_merge_preamble_packages`）  
-   将 `\begin{document}` 内意外出现的 `\usepackage` 移到 preamble；去重 `\definecolor` 定义  
-   解决 MiniMax 多页拼接时后续页把包声明放在 body 里导致编译失败的问题
+5. **preamble 合并与去重**（`_merge_preamble_packages`）  
+   将 `\begin{document}` 内意外出现的 `\usepackage` 移到 preamble；去重 `\definecolor` 定义。  
+   模型在多页场景下偶尔会在 body 内输出额外的包声明，此步骤作为通用安全兜底。
 
 ### `latex_helper/prompts.py` — System Prompt 要点
 
@@ -236,6 +237,7 @@ const state = {
 8. **`\includegraphics` 正则误伤 screenshot 图片** → 原正则误把选项 `[width=...]` 部分识别为文件名；改用 `_RE_INCLUDEGRAPHICS_FNAME` 精确提取 `{...}` 中的文件名，带图片后缀的文件不再被注释
 9. **图片 sanitize 删除字符导致扩展名丢失** → `re.sub(unsafe_chars, "", name)` 改为 `re.sub(unsafe_chars, "_", name)`，保留 `.` 使扩展名完整
 10. **screenshot 模式无图时 LLM 仍被告知有 1 张图** → `max(figure_count, 1)` 改为精确判断：`figure_count == 0` 时退回 skip 模式 prompt
+11. **MiniMax VLM 接口迁移至标准 chat completions API** → 原接口 `/v1/coding_plan/vlm` 为非标准端点，每次只接受一张图，多页 PDF 需串行调用；改为 `/v1/chat/completions`（OpenAI vision 格式），多页 PDF 一次请求批量传入全部页图片，减少 API 调用次数，也消除了逐页拼接 LaTeX 的复杂度。同步将 `MINIMAX_TEXT_MODEL` 默认值从 `MiniMax-M2.7` 升级为 `minimax-m3`，vision 与 fix 共用同一模型。注: `_strip_end_document` / `_extract_body` 仍被 `SimpletexConverter` 路径 (`_assemble_simpletex_document`) 使用,SimpleTex 公式 OCR 路径在 `get_converter` 仍注册,这两个函数与 `import re` 均保留,本条历史决策不构成删除。
 
 ---
 

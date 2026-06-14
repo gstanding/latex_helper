@@ -11,6 +11,14 @@ import tempfile
 import aiofiles
 
 logger = logging.getLogger("latex_helper")
+# Uvicorn sets root logger to WARNING, silencing our INFO timing logs.
+# Add a direct handler so latex_helper.* messages always reach the console.
+if not logger.handlers:
+    _h = logging.StreamHandler()
+    _h.setFormatter(logging.Formatter("%(levelname)-9s %(name)s - %(message)s"))
+    logger.addHandler(_h)
+logger.setLevel(logging.INFO)
+logger.propagate = False
 
 _PDF_MAGIC = b"%PDF-"
 
@@ -35,7 +43,7 @@ from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from latex_helper.converter import get_converter, get_llm_info
+from latex_helper.converter import get_available_converters, get_converter, get_llm_info
 from latex_helper.utils import MAX_FILE_SIZE, detect_file_type, extract_pdf_figures, postprocess_latex
 
 _DANGEROUS_LATEX = {r"\write18", r"\immediate\write"}
@@ -49,22 +57,25 @@ def _needs_xelatex(src: str) -> bool:
 
 def _parse_latex_log(log: str) -> dict:
     """Extract first fatal error and line number from a pdflatex/xelatex log."""
-    error_msg = None
-    error_line = None
-    for i, line in enumerate(log.splitlines()):
+    lines = log.splitlines()
+    for i, line in enumerate(lines):
         if line.startswith("!"):
-            error_msg = line[1:].strip()
-            for j in range(i + 1, min(i + 15, len(log.splitlines()))):
-                lm = _re.match(r"^l\.(\d+)", log.splitlines()[j])
+            for j in range(i + 1, min(i + 15, len(lines))):
+                lm = _re.match(r"^l\.(\d+)", lines[j])
                 if lm:
-                    error_line = int(lm.group(1))
-                    break
-            break
-    return {"error": error_msg, "line": error_line}
+                    return {"error": line[1:].strip(), "line": int(lm.group(1))}
+            return {"error": line[1:].strip(), "line": None}
+    return {"error": None, "line": None}
 
 
 class CompileRequest(BaseModel):
     latex: str
+    images: dict[str, str] = {}
+
+
+class FixRequest(BaseModel):
+    latex: str
+    log: str = ""
     images: dict[str, str] = {}
 
 app = FastAPI(title="LaTeX Helper")
@@ -85,6 +96,7 @@ _VALID_FIGURE_MODES = {"draw", "skip", "screenshot"}
 async def convert(
     file: UploadFile = File(...),
     figure_mode: str = Form("draw"),
+    converter: str = Form(""),
 ):
     content = await file.read()
 
@@ -99,44 +111,57 @@ async def convert(
     except ValueError as e:
         raise HTTPException(415, detail=str(e))
 
-    # Pre-extract figures for screenshot mode (before calling LLM so we know the count)
+    # Pre-extract figures for screenshot mode — CPU-bound, run off event loop
     figures_b64: dict[str, str] = {}
     figure_count = 0
     if figure_mode == "screenshot" and file_type == "pdf":
-        raw_figures = extract_pdf_figures(content)
+        raw_figures = await asyncio.get_running_loop().run_in_executor(
+            None, extract_pdf_figures, content
+        )
         figure_count = len(raw_figures)
         figures_b64 = {
             name: base64.standard_b64encode(data).decode("ascii")
             for name, data in raw_figures.items()
         }
 
-    converter = get_converter()
+    converter_instance = get_converter(converter or None)
 
     async def event_generator():
         try:
-            full_latex = ""
+            import time as _time
+            chunks: list[str] = []
             char_count = 0
-            last_progress = asyncio.get_event_loop().time()
+            loop = asyncio.get_running_loop()
+            last_progress = loop.time()
 
-            async for chunk in converter.stream_latex(
+            # Tell the client the output format (latex or markdown) upfront
+            output_fmt = getattr(converter_instance, "output_format", "latex")
+            yield f"event: format\ndata: {json.dumps(output_fmt)}\n\n"
+
+            async for chunk in converter_instance.stream_latex(
                 content,
                 file_type,
                 file.filename or "",
                 figure_mode=figure_mode,
                 figure_count=figure_count,
             ):
-                full_latex += chunk
+                chunks.append(chunk)
                 char_count += len(chunk)
-                now = asyncio.get_event_loop().time()
+                # Yield each token immediately so the client sees real-time streaming
+                yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+                now = loop.time()
                 if now - last_progress >= 5.0:
                     yield f"event: progress\ndata: {json.dumps({'chars': char_count})}\n\n"
                     last_progress = now
 
-            full_latex = postprocess_latex(full_latex)
+            t_pp = _time.perf_counter()
+            full_text = "".join(chunks)
+            if output_fmt == "latex":
+                full_text = postprocess_latex(full_text)
+                logger.info("[convert] postprocess %.2fs (%d chars)", _time.perf_counter() - t_pp, len(full_text))
 
-            chunk_size = 512
-            for i in range(0, len(full_latex), chunk_size):
-                yield f"data: {json.dumps(full_latex[i:i + chunk_size], ensure_ascii=False)}\n\n"
+            # Replace streamed content with (postprocessed) final version
+            yield f"event: replace\ndata: {json.dumps(full_text, ensure_ascii=False)}\n\n"
 
             if figures_b64:
                 yield f"event: images\ndata: {json.dumps(figures_b64, ensure_ascii=False)}\n\n"
@@ -259,6 +284,34 @@ async def compile_latex(req: CompileRequest):
     )
 
 
+@app.post("/fix")
+async def fix_latex(req: FixRequest):
+    if not req.latex.strip():
+        raise HTTPException(400, detail="Empty LaTeX source.")
+
+    fix_converter = get_converter()
+
+    async def event_generator():
+        try:
+            chunks: list[str] = []
+            async for chunk in fix_converter.stream_fix(req.latex, req.log):
+                chunks.append(chunk)
+                yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+
+            full_latex = postprocess_latex("".join(chunks))
+            yield f"event: replace\ndata: {json.dumps(full_latex, ensure_ascii=False)}\n\n"
+            yield "event: done\ndata: \n\n"
+        except Exception as e:
+            logger.error("Fix error: %s", e, exc_info=True)
+            yield f"event: error\ndata: {json.dumps({'message': str(e)})}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 @app.get("/health/pdflatex")
 async def health_pdflatex():
     return {
@@ -271,3 +324,8 @@ async def health_pdflatex():
 @app.get("/health/llm")
 async def health_llm():
     return get_llm_info()
+
+
+@app.get("/health/converters")
+async def health_converters():
+    return get_available_converters()
